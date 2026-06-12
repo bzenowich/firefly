@@ -1,0 +1,9 @@
+*.qcow2
+*.qcow2.xz
+CHECKSUM.SHA256
+known_hosts
+console.sock
+qemu.pid
+provision.cmds
+fwd-freebsd
+serial.log
