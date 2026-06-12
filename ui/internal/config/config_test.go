@@ -59,6 +59,46 @@ func TestValidateDuplicateWANPort(t *testing.T) {
 	}
 }
 
+func TestValidateDHCP(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"default ok", func(c *Config) {}, ""},
+		{"disabled skips checks", func(c *Config) {
+			c.DHCP.Enabled = false
+			c.DHCP.RangeStart = "garbage"
+		}, ""},
+		{"pool outside lan", func(c *Config) { c.DHCP.RangeEnd = "10.9.9.9" }, "inside"},
+		{"bad range ip", func(c *Config) { c.DHCP.RangeStart = "nope" }, "invalid pool"},
+		{"lease too short", func(c *Config) { c.DHCP.LeaseSeconds = 5 }, "at least 60"},
+		{"lan needs static ip", func(c *Config) {
+			c.Interfaces[1].IPv4 = ""
+			c.Interfaces[1].DHCPClient = true
+		}, "static address"},
+		{"bad lease mac", func(c *Config) {
+			c.DHCP.StaticLeases = []StaticLease{{MAC: "zz:zz", IP: "192.168.1.5", Hostname: "x"}}
+		}, "invalid mac"},
+		{"lease ip outside lan", func(c *Config) {
+			c.DHCP.StaticLeases = []StaticLease{{MAC: "00:0d:b9:51:ab:cd", IP: "10.1.1.1", Hostname: "x"}}
+		}, "inside"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestStoreRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fw.json")
 

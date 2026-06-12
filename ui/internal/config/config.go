@@ -148,7 +148,54 @@ func (c *Config) Validate() error {
 	if err := c.NAT.validate(); err != nil {
 		return err
 	}
-	// TODO: validate interface addresses, DHCP ranges, wireguard keys.
+	if err := c.validateDHCP(); err != nil {
+		return err
+	}
+	// TODO: validate interface addresses, wireguard keys.
+	return nil
+}
+
+// LAN returns the lan-role interface. Validate guarantees exactly one exists.
+func (c *Config) LAN() Interface {
+	for _, ifc := range c.Interfaces {
+		if ifc.Role == "lan" {
+			return ifc
+		}
+	}
+	return Interface{}
+}
+
+func (c *Config) validateDHCP() error {
+	d := c.DHCP
+	if !d.Enabled {
+		return nil
+	}
+	lan := c.LAN()
+	if lan.IPv4 == "" {
+		return errors.New("dhcp: lan interface needs a static address")
+	}
+	_, lanNet, err := net.ParseCIDR(lan.IPv4)
+	if err != nil {
+		return fmt.Errorf("dhcp: lan address: %w", err)
+	}
+	start, end := net.ParseIP(d.RangeStart), net.ParseIP(d.RangeEnd)
+	if start == nil || end == nil {
+		return errors.New("dhcp: invalid pool range")
+	}
+	if !lanNet.Contains(start) || !lanNet.Contains(end) {
+		return fmt.Errorf("dhcp: pool must be inside %s", lanNet)
+	}
+	if d.LeaseSeconds < 60 {
+		return errors.New("dhcp: lease must be at least 60 seconds")
+	}
+	for _, l := range d.StaticLeases {
+		if _, err := net.ParseMAC(l.MAC); err != nil {
+			return fmt.Errorf("dhcp: static lease %q: invalid mac", l.Hostname)
+		}
+		if ip := net.ParseIP(l.IP); ip == nil || !lanNet.Contains(ip) {
+			return fmt.Errorf("dhcp: static lease %q: ip must be inside %s", l.Hostname, lanNet)
+		}
+	}
 	return nil
 }
 
