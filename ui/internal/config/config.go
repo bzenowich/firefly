@@ -108,7 +108,10 @@ type WGTunnel struct {
 	Address    string   `json:"address"` // CIDR
 	ListenPort int      `json:"listen_port"`
 	PrivateKey string   `json:"private_key"` // base64; generated via NewWGKeypair
-	Peers      []WGPeer `json:"peers"`
+	// EndpointHost is the public host[:port] mobile clients dial; it goes
+	// into generated peer configs. Port defaults to ListenPort.
+	EndpointHost string   `json:"endpoint_host,omitempty"`
+	Peers        []WGPeer `json:"peers"`
 }
 
 type WGPeer struct {
@@ -117,6 +120,10 @@ type WGPeer struct {
 	AllowedIPs string `json:"allowed_ips"` // comma-separated CIDRs
 	Endpoint   string `json:"endpoint,omitempty"`
 	Keepalive  int    `json:"keepalive,omitempty"` // seconds; for peers behind NAT
+	// PrivateKey is kept only when the appliance generated the peer's
+	// keypair, so the client config/QR stays downloadable. Empty when the
+	// user supplied their own public key.
+	PrivateKey string `json:"private_key,omitempty"`
 }
 
 // Default returns the out-of-box configuration: LAN on 192.168.1.1/24 with
@@ -239,11 +246,16 @@ func (wg *WireGuard) validate() error {
 		return nil
 	}
 	ports := map[int]bool{}
+	names := map[string]bool{}
 	for _, t := range wg.Tunnels {
 		where := fmt.Sprintf("wireguard tunnel %q", t.Name)
 		if t.Name == "" {
 			return errors.New("wireguard tunnel: name is required")
 		}
+		if names[t.Name] {
+			return fmt.Errorf("%s: duplicate name", where)
+		}
+		names[t.Name] = true
 		if _, _, err := net.ParseCIDR(t.Address); err != nil {
 			return fmt.Errorf("%s: address must be CIDR: %w", where, err)
 		}
@@ -257,9 +269,20 @@ func (wg *WireGuard) validate() error {
 		if !validWGKey(t.PrivateKey) {
 			return fmt.Errorf("%s: invalid private key", where)
 		}
+		peerNames := map[string]bool{}
 		for _, p := range t.Peers {
+			if p.Name == "" {
+				return fmt.Errorf("%s peer: name is required", where)
+			}
+			if peerNames[p.Name] {
+				return fmt.Errorf("%s peer %q: duplicate name", where, p.Name)
+			}
+			peerNames[p.Name] = true
 			if !validWGKey(p.PublicKey) {
 				return fmt.Errorf("%s peer %q: invalid public key", where, p.Name)
+			}
+			if p.PrivateKey != "" && !validWGKey(p.PrivateKey) {
+				return fmt.Errorf("%s peer %q: invalid private key", where, p.Name)
 			}
 			if p.AllowedIPs == "" {
 				return fmt.Errorf("%s peer %q: allowed ips required", where, p.Name)

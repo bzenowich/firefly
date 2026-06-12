@@ -1,20 +1,78 @@
 {{define "content"}}
 <h1>WireGuard</h1>
-<p>{{if .Cfg.WireGuard.Enabled}}<span class="ok">enabled</span>{{else}}<span class="bad">disabled</span>{{end}}</p>
-{{if .Cfg.WireGuard.Tunnels}}
+
+<form method="post" action="/wireguard/settings" class="row-form">
+  <label class="check"><input type="checkbox" name="enabled" {{if .Cfg.WireGuard.Enabled}}checked{{end}}> Enabled</label>
+  <button type="submit">Save</button>
+</form>
+
 {{range .Cfg.WireGuard.Tunnels}}
 <h2>{{.Name}} · {{.Address}} · :{{.ListenPort}}</h2>
+{{if eq .Name $.EditID}}
+<form method="post" action="/wireguard/tunnels/{{.Name}}" class="row-form">
+  <label>Address <input name="address" value="{{.Address}}" size="18" required></label>
+  <label>Port <input name="listen_port" value="{{.ListenPort}}" size="6" required></label>
+  <label>Public endpoint <input name="endpoint_host" value="{{.EndpointHost}}" size="22" placeholder="vpn.example.com"></label>
+  <button type="submit">Save</button>
+  <a href="/wireguard" class="button-link">Cancel</a>
+</form>
+{{else}}
+<p class="row-form">
+  {{if .EndpointHost}}<span class="muted">endpoint {{.EndpointHost}}</span>{{else}}<span class="muted">no public endpoint set — client configs omit Endpoint</span>{{end}}
+  <a href="/wireguard?edit={{.Name}}" class="button-link">Edit</a>
+  <form method="post" action="/wireguard/tunnels/{{.Name}}/delete">
+    <button type="submit" class="danger">Delete tunnel</button>
+  </form>
+</p>
+{{end}}
+
+{{$t := .}}
+{{if .Peers}}
 <table>
-  <thead><tr><th>Peer</th><th>Public key</th><th>Allowed IPs</th><th>Endpoint</th></tr></thead>
+  <thead><tr><th>Peer</th><th>Public key</th><th>Allowed IPs</th><th>Endpoint</th><th></th></tr></thead>
   <tbody>
     {{range .Peers}}
-    <tr><td>{{.Name}}</td><td class="mono">{{.PublicKey}}</td><td>{{.AllowedIPs}}</td><td>{{.Endpoint}}</td></tr>
+    <tr>
+      <td>{{.Name}}</td>
+      <td class="mono">{{.PublicKey}}</td>
+      <td>{{.AllowedIPs}}</td>
+      <td>{{.Endpoint}}</td>
+      <td class="actions">
+        {{if .PrivateKey}}
+        <a href="/wireguard/tunnels/{{$t.Name}}/peers/{{.Name}}/config" class="button-link">Config</a>
+        <a href="/wireguard/tunnels/{{$t.Name}}/peers/{{.Name}}/qr.png" class="button-link">QR</a>
+        {{end}}
+        <form method="post" action="/wireguard/tunnels/{{$t.Name}}/peers/{{.Name}}/delete">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
     {{end}}
   </tbody>
 </table>
-{{end}}
 {{else}}
-<p class="muted">No tunnels configured.</p>
+<p class="muted">No peers.</p>
 {{end}}
-<!-- TODO: tunnel/peer CRUD, key generation, mobile-client QR codes, live handshake status from wg(8) -->
+
+<h3>Add peer to {{.Name}}</h3>
+<form method="post" action="/wireguard/tunnels/{{.Name}}/peers" class="row-form">
+  <label>Name <input name="name" placeholder="phone" required></label>
+  <label>Allowed IPs <input name="allowed_ips" size="18" placeholder="10.8.0.2/32" required></label>
+  <label>Public key <input name="public_key" size="20" placeholder="blank = generate"></label>
+  <label>Endpoint <input name="endpoint" size="18" placeholder="optional host:port"></label>
+  <label>Keepalive <input name="keepalive" size="4" placeholder="25"></label>
+  <button type="submit">Add</button>
+</form>
+<p class="muted">Leave public key blank to generate the keypair here; the peer then gets a downloadable config and QR code.</p>
+{{end}}
+
+<h2>Add tunnel</h2>
+<form method="post" action="/wireguard/tunnels" class="row-form">
+  <label>Name <input name="name" placeholder="wg0" required></label>
+  <label>Address <input name="address" size="18" placeholder="10.8.0.1/24" required></label>
+  <label>Port <input name="listen_port" size="6" placeholder="51820" required></label>
+  <label>Public endpoint <input name="endpoint_host" size="22" placeholder="vpn.example.com"></label>
+  <button type="submit">Add</button>
+</form>
+<!-- TODO: live handshake status from wg(8) -->
 {{end}}

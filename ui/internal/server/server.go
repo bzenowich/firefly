@@ -128,6 +128,7 @@ func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 
 	s.routesDHCP()
 	s.routesDNS()
+	s.routesWireGuard()
 
 	return s, nil
 }
