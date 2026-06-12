@@ -20,6 +20,7 @@ import (
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/cert"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/logs"
 	"firewall/ui/internal/server"
 )
 
@@ -61,7 +62,20 @@ func main() {
 	}
 	mgr := apply.New(sys, *window)
 
-	srv, err := server.New(store, mgr)
+	// Log ring buffer lives next to the config; collectors only exist on
+	// FreeBSD (tcpdump on pflog0, tail on syslog files).
+	logStore, err := logs.Open(filepath.Join(dir, "fw-logs.db"), 50000)
+	if err != nil {
+		log.Fatalf("logs: %v", err)
+	}
+	defer logStore.Close()
+	collectCtx, stopCollect := context.WithCancel(context.Background())
+	defer stopCollect()
+	if runtime.GOOS == "freebsd" {
+		logs.NewCollector(logStore).Run(collectCtx)
+	}
+
+	srv, err := server.New(store, mgr, logStore)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}

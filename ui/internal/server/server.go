@@ -20,6 +20,7 @@ import (
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/auth"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/logs"
 	"firewall/ui/internal/render"
 	"firewall/ui/internal/system"
 	"firewall/ui/web"
@@ -54,6 +55,7 @@ const (
 type Server struct {
 	store     *config.Store
 	mgr       *apply.Manager
+	logStore  *logs.Store
 	mux       *http.ServeMux
 	sessions  *auth.Sessions
 	logins    *auth.Limiter
@@ -68,10 +70,11 @@ var funcs = template.FuncMap{
 	"humanBytes": humanBytes,
 }
 
-func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
+func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store) (*Server, error) {
 	s := &Server{
 		store:       store,
 		mgr:         mgr,
+		logStore:    logStore,
 		mux:         http.NewServeMux(),
 		sessions:    auth.NewSessions(sessionTTL),
 		logins:      auth.NewLimiter(loginMaxFails, loginWindow),
@@ -119,6 +122,7 @@ func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s.mux.HandleFunc("POST /setup", s.handleSetup)
 
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
+	s.mux.HandleFunc("GET /partials/logs", s.handleLogsPartial)
 	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
 	s.mux.HandleFunc("POST /system/interfaces/{name}", s.handleInterfaceUpdate)
@@ -304,6 +308,9 @@ type pageData struct {
 
 	TOTPEnrolled bool // logged-in user has 2FA active
 	TOTPPending  bool // enrollment QR awaiting confirmation
+
+	Logs      []logs.Entry // Logs page only
+	LogFilter logs.Filter
 }
 
 func (s *Server) data(p Page, r *http.Request) pageData {
@@ -328,7 +335,32 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		s.totpMu.Unlock()
 	}
 	d.ApplyDeadline, d.ApplyPending = s.mgr.Pending()
+	if p.Path == "/logs" && r != nil {
+		d.LogFilter = logs.Filter{
+			Source:   r.URL.Query().Get("source"),
+			Contains: r.URL.Query().Get("contains"),
+		}
+		var err error
+		if d.Logs, err = s.logStore.Recent(d.LogFilter); err != nil {
+			log.Printf("logs query: %v", err)
+		}
+	}
 	return d
+}
+
+// handleLogsPartial serves the table fragment the Logs page polls, keeping
+// the active filter via query params.
+func (s *Server) handleLogsPartial(w http.ResponseWriter, r *http.Request) {
+	var logsPage Page
+	for _, p := range pages {
+		if p.Path == "/logs" {
+			logsPage = p
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpls["/logs"].ExecuteTemplate(w, "logtable", s.data(logsPage, r)); err != nil {
+		log.Printf("render logs partial: %v", err)
+	}
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, p Page) {

@@ -1,5 +1,39 @@
 {{define "content"}}
 <h1>Logs</h1>
-<p class="muted">Live firewall log (pflog tail over SSE) and filterable system log land here.</p>
-<!-- TODO: SSE endpoint tailing pflog -> htmx sse extension; syslog view with filters -->
+
+<form method="get" action="/logs" class="row-form">
+  <label>Source
+    <select name="source">
+      <option value="" {{if eq .LogFilter.Source ""}}selected{{end}}>all</option>
+      <option value="pf" {{if eq .LogFilter.Source "pf"}}selected{{end}}>firewall (pf)</option>
+      <option value="system" {{if eq .LogFilter.Source "system"}}selected{{end}}>system</option>
+    </select>
+  </label>
+  <label>Contains <input name="contains" value="{{.LogFilter.Contains}}" size="25" placeholder="filter text"></label>
+  <button type="submit">Filter</button>
+</form>
+
+<div hx-get="/partials/logs?source={{urlquery .LogFilter.Source}}&contains={{urlquery .LogFilter.Contains}}"
+     hx-trigger="every 5s" hx-swap="innerHTML">
+  {{template "logtable" .}}
+</div>
+{{end}}
+
+{{define "logtable"}}
+{{if .Logs}}
+<table class="logs">
+  <thead><tr><th>Time</th><th>Source</th><th>Message</th></tr></thead>
+  <tbody>
+    {{range .Logs}}
+    <tr>
+      <td class="muted">{{.Time.Format "Jan 02 15:04:05"}}</td>
+      <td>{{.Source}}</td>
+      <td class="mono">{{.Line}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No log entries{{if or .LogFilter.Source .LogFilter.Contains}} matching the filter{{end}} yet.</p>
+{{end}}
 {{end}}

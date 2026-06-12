@@ -12,6 +12,7 @@ import (
 
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/logs"
 )
 
 // client wraps a Server with the session cookie obtained from first-run
@@ -28,13 +29,23 @@ func newTestServer(t *testing.T) (*client, *config.Store) {
 		t.Fatal(err)
 	}
 	mgr := apply.New(apply.OSSystem{Root: filepath.Join(t.TempDir(), "root"), NoExec: true}, time.Minute)
-	srv, err := New(store, mgr)
+	srv, err := New(store, mgr, newTestLogStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := &client{srv: srv}
 	c.cookie = setup(t, srv)
 	return c, store
+}
+
+func newTestLogStore(t *testing.T) *logs.Store {
+	t.Helper()
+	ls, err := logs.Open(filepath.Join(t.TempDir(), "logs.db"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ls.Close() })
+	return ls
 }
 
 // setup runs first-run admin creation and returns the session cookie.
@@ -132,7 +143,7 @@ func TestFirstRunSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0))
+	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), newTestLogStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +360,7 @@ func TestApplyWritesFiles(t *testing.T) {
 	}
 	root := filepath.Join(t.TempDir(), "root")
 	mgr := apply.New(apply.OSSystem{Root: root, NoExec: true}, 0)
-	srv, err := New(store, mgr)
+	srv, err := New(store, mgr, newTestLogStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
