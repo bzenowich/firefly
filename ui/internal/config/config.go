@@ -294,13 +294,23 @@ func (c *Config) validateDHCP() error {
 	if d.LeaseSeconds < 60 {
 		return errors.New("dhcp: lease must be at least 60 seconds")
 	}
+	macs, ips := map[string]bool{}, map[string]bool{}
 	for _, l := range d.StaticLeases {
-		if _, err := net.ParseMAC(l.MAC); err != nil {
+		hw, err := net.ParseMAC(l.MAC)
+		if err != nil {
 			return fmt.Errorf("dhcp: static lease %q: invalid mac", l.Hostname)
 		}
+		if macs[hw.String()] {
+			return fmt.Errorf("dhcp: static lease %q: duplicate mac %s", l.Hostname, l.MAC)
+		}
+		macs[hw.String()] = true
 		if ip := net.ParseIP(l.IP); ip == nil || !lanNet.Contains(ip) {
 			return fmt.Errorf("dhcp: static lease %q: ip must be inside %s", l.Hostname, lanNet)
 		}
+		if ips[l.IP] {
+			return fmt.Errorf("dhcp: static lease %q: duplicate ip %s", l.Hostname, l.IP)
+		}
+		ips[l.IP] = true
 	}
 	return nil
 }

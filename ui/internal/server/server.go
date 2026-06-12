@@ -126,6 +126,8 @@ func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s.mux.HandleFunc("POST /nat/forwards/{id}/toggle", s.handleForwardToggle)
 	s.mux.HandleFunc("POST /nat/forwards/{id}/delete", s.handleForwardDelete)
 
+	s.routesDHCP()
+
 	return s, nil
 }
 

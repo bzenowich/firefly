@@ -1,19 +1,59 @@
 {{define "content"}}
 <h1>DHCP</h1>
-<p>Server: {{if .Cfg.DHCP.Enabled}}<span class="ok">enabled</span>{{else}}<span class="bad">disabled</span>{{end}}
-   · pool {{.Cfg.DHCP.RangeStart}} – {{.Cfg.DHCP.RangeEnd}} · lease {{.Cfg.DHCP.LeaseSeconds}}s</p>
+
+<h2>Server settings</h2>
+<form method="post" action="/dhcp/settings" class="row-form">
+  <label class="check"><input type="checkbox" name="enabled" {{if .Cfg.DHCP.Enabled}}checked{{end}}> Enabled</label>
+  <label>Pool start <input name="range_start" value="{{.Cfg.DHCP.RangeStart}}" size="15" required></label>
+  <label>Pool end <input name="range_end" value="{{.Cfg.DHCP.RangeEnd}}" size="15" required></label>
+  <label>Lease (s) <input name="lease_seconds" value="{{.Cfg.DHCP.LeaseSeconds}}" size="7" required></label>
+  <button type="submit">Save</button>
+</form>
+
 <h2>Static leases</h2>
 {{if .Cfg.DHCP.StaticLeases}}
 <table>
-  <thead><tr><th>MAC</th><th>IP</th><th>Hostname</th></tr></thead>
+  <thead><tr><th>MAC</th><th>IP</th><th>Hostname</th><th></th></tr></thead>
   <tbody>
     {{range .Cfg.DHCP.StaticLeases}}
-    <tr><td>{{.MAC}}</td><td>{{.IP}}</td><td>{{.Hostname}}</td></tr>
+    {{if eq .MAC $.EditID}}
+    <tr>
+      <td colspan="4">
+        <form method="post" action="/dhcp/leases/{{.MAC}}" class="row-form">
+          <input name="mac" value="{{.MAC}}" size="17" required>
+          <input name="ip" value="{{.IP}}" size="15" required>
+          <input name="hostname" value="{{.Hostname}}" placeholder="hostname">
+          <button type="submit">Save</button>
+          <a href="/dhcp" class="button-link">Cancel</a>
+        </form>
+      </td>
+    </tr>
+    {{else}}
+    <tr>
+      <td class="mono">{{.MAC}}</td>
+      <td>{{.IP}}</td>
+      <td>{{.Hostname}}</td>
+      <td class="actions">
+        <a href="/dhcp?edit={{.MAC}}" class="button-link">Edit</a>
+        <form method="post" action="/dhcp/leases/{{.MAC}}/delete">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
     {{end}}
   </tbody>
 </table>
 {{else}}
 <p class="muted">No static leases configured.</p>
 {{end}}
-<!-- TODO: pool/lease editing, active lease table from Kea -->
+
+<h2>Add static lease</h2>
+<form method="post" action="/dhcp/leases" class="row-form">
+  <label>MAC <input name="mac" size="17" placeholder="aa:bb:cc:dd:ee:ff" required></label>
+  <label>IP <input name="ip" size="15" placeholder="192.168.1.50" required></label>
+  <label>Hostname <input name="hostname" placeholder="printer"></label>
+  <button type="submit">Add</button>
+</form>
+<!-- TODO: active lease table from Kea -->
 {{end}}
