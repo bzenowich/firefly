@@ -15,6 +15,11 @@ sed -i '' -E 's/^#?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ss
 sysrc hostname=fwtest sshd_enable=YES
 hostname fwtest
 service sshd restart || service sshd start
+sysrc ifconfig_vtnet0="SYNCDHCP -txcsum -rxcsum -tso -lro"
+sysrc ifconfig_vtnet1="up" ifconfig_vtnet2="up"
+sysrc pf_enable=YES pflog_enable=YES kea_enable=YES unbound_enable=YES wireguard_enable=YES
+printf 'pass all\n' > /etc/pf.conf
+pkg install -y kea unbound wireguard-tools
 poweroff
 EOF
 
