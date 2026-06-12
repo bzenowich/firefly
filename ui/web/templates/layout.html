@@ -11,6 +11,10 @@
   <header>
     <span class="brand">firewall</span><!-- TODO: product name (plan.md §12) -->
     <span class="host">{{.Cfg.System.Hostname}}.{{.Cfg.System.Domain}}</span>
+    <form method="post" action="/logout" class="logout">
+      <span class="muted">{{.User}}</span>
+      <button type="submit" class="secondary">Log out</button>
+    </form>
   </header>
   <div class="wrap">
     <nav>

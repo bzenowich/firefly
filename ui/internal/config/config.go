@@ -27,6 +27,15 @@ type Config struct {
 	DHCP       DHCP        `json:"dhcp"`
 	DNS        DNS         `json:"dns"`
 	WireGuard  WireGuard   `json:"wireguard"`
+	Users      []User      `json:"users"`
+}
+
+// User is a WebUI login. The hash is an argon2id PHC string (see the auth
+// package). Users live in the config document so the single-file backup
+// carries them (plan.md §7). An empty list means first-run setup is pending.
+type User struct {
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
 }
 
 type System struct {
@@ -157,6 +166,9 @@ func (c *Config) Validate() error {
 	if err := c.WireGuard.validate(); err != nil {
 		return err
 	}
+	if err := c.validateUsers(); err != nil {
+		return err
+	}
 	// TODO: validate interface addresses.
 	return nil
 }
@@ -196,6 +208,23 @@ func (wg *WireGuard) validate() error {
 					return fmt.Errorf("%s peer %q: allowed ips: %w", where, p.Name, err)
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateUsers() error {
+	seen := map[string]bool{}
+	for _, u := range c.Users {
+		if u.Username == "" {
+			return errors.New("user: username is required")
+		}
+		if seen[u.Username] {
+			return fmt.Errorf("user %q: duplicate username", u.Username)
+		}
+		seen[u.Username] = true
+		if !strings.HasPrefix(u.PasswordHash, "$argon2id$") {
+			return fmt.Errorf("user %q: password hash must be argon2id", u.Username)
 		}
 	}
 	return nil

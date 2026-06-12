@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{if .FirstRun}}Setup{{else}}Log in{{end}} · firewall</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="login">
+    <h1 class="brand">firewall</h1>
+    {{if .Error}}<p class="flash-error">{{.Error}}</p>{{end}}
+    {{if .FirstRun}}
+    <p class="muted">Create the administrator account to finish setup.</p>
+    <form method="post" action="/setup">
+      <label>Username
+        <input name="username" required autofocus autocomplete="username">
+      </label>
+      <label>Password
+        <input type="password" name="password" required minlength="8" autocomplete="new-password">
+      </label>
+      <label>Confirm password
+        <input type="password" name="confirm" required minlength="8" autocomplete="new-password">
+      </label>
+      <button type="submit">Create account</button>
+    </form>
+    {{else}}
+    <form method="post" action="/login">
+      <label>Username
+        <input name="username" required autofocus autocomplete="username">
+      </label>
+      <label>Password
+        <input type="password" name="password" required autocomplete="current-password">
+      </label>
+      <button type="submit">Log in</button>
+    </form>
+    {{end}}
+  </main>
+</body>
+</html>
