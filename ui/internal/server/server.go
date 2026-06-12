@@ -127,6 +127,7 @@ func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s.mux.HandleFunc("POST /nat/forwards/{id}/delete", s.handleForwardDelete)
 
 	s.routesDHCP()
+	s.routesDNS()
 
 	return s, nil
 }

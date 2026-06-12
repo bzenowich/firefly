@@ -166,6 +166,9 @@ func (c *Config) Validate() error {
 	if err := c.validateDHCP(); err != nil {
 		return err
 	}
+	if err := c.DNS.validate(); err != nil {
+		return err
+	}
 	if err := c.WireGuard.validate(); err != nil {
 		return err
 	}
@@ -199,6 +202,33 @@ func (c *Config) validateInterfaces() error {
 		}
 		if ifc.Role == "wan" && !ifc.DHCPClient && ifc.IPv4 == "" {
 			return fmt.Errorf("%s: wan needs dhcp or a static address", where)
+		}
+	}
+	return nil
+}
+
+func (d *DNS) validate() error {
+	urls := map[string]bool{}
+	for _, u := range d.Adblock.Lists {
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			return fmt.Errorf("dns: blocklist %q: must be an http(s) url", u)
+		}
+		if urls[u] {
+			return fmt.Errorf("dns: blocklist %q: duplicate", u)
+		}
+		urls[u] = true
+	}
+	hosts := map[string]bool{}
+	for _, o := range d.Overrides {
+		if o.Host == "" || strings.ContainsAny(o.Host, " \t") {
+			return fmt.Errorf("dns: override %q: invalid hostname", o.Host)
+		}
+		if hosts[o.Host] {
+			return fmt.Errorf("dns: override %q: duplicate host", o.Host)
+		}
+		hosts[o.Host] = true
+		if net.ParseIP(o.IP) == nil {
+			return fmt.Errorf("dns: override %q: invalid ip %q", o.Host, o.IP)
 		}
 	}
 	return nil
