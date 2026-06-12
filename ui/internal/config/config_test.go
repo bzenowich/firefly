@@ -179,3 +179,40 @@ func TestValidateInterfaces(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateRejectionLeavesNoTrace(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "fw.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// In-place slice-element mutation that fails validation must not leak
+	// into the live config (regression: shallow copy shared backing arrays).
+	err = store.Update(func(c *Config) error {
+		for i := range c.Interfaces {
+			if c.Interfaces[i].Role == "lan" {
+				c.Interfaces[i].IPv4 = "10.0.2.15/24" // pool now outside subnet
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected validation failure")
+	}
+	for _, ifc := range store.Get().Interfaces {
+		if ifc.Role == "lan" && ifc.IPv4 != "192.168.1.1/24" {
+			t.Fatalf("rejected mutation leaked: lan = %+v", ifc)
+		}
+	}
+}
+
+func TestGetIsDeepCopy(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "fw.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := store.Get()
+	got.Interfaces[0].Device = "tampered"
+	if store.Get().Interfaces[0].Device == "tampered" {
+		t.Fatal("Get returned shared slice memory")
+	}
+}

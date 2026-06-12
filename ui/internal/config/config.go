@@ -446,11 +446,12 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
-// Get returns a copy of the current configuration.
+// Get returns a deep copy of the current configuration, so callers can never
+// mutate live state through shared slices.
 func (s *Store) Get() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cfg
+	return s.cfg.clone()
 }
 
 // Replace swaps in a whole new config (restore-from-backup), validates, and
@@ -462,12 +463,27 @@ func (s *Store) Replace(next Config) error {
 	})
 }
 
+// clone deep-copies via the JSON round trip — Config is a JSON document, so
+// this is exact. A struct assignment is NOT enough: the slices inside would
+// share backing arrays and in-place edits would leak into the original.
+func (c Config) clone() Config {
+	data, err := json.Marshal(c)
+	if err != nil {
+		panic(err) // Config is always marshalable; see save()
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		panic(err)
+	}
+	return out
+}
+
 // Update mutates the config under lock, validates, and persists. The mutation
 // is discarded if validation or save fails.
 func (s *Store) Update(fn func(*Config) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := s.cfg
+	next := s.cfg.clone()
 	if err := fn(&next); err != nil {
 		return err
 	}
