@@ -4,12 +4,16 @@
 package apply
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"io/fs"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // System abstracts the host so the pipeline is testable off-FreeBSD.
@@ -93,9 +97,22 @@ func (s OSSystem) Run(name string, args ...string) error {
 		log.Printf("apply (noexec): %s %s", name, strings.Join(args, " "))
 		return nil
 	}
-	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil {
-		return &CmdError{Cmd: name + " " + strings.Join(args, " "), Output: string(out), Err: err}
+	// Hard ceiling on any single command; a wedged rc script must not pin
+	// the apply mutex (and with it every page render) forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	// rc scripts hand our output pipe to the daemons they start (kea,
+	// unbound); without WaitDelay, Wait blocks on that inherited fd until
+	// the daemon exits — the live-lock found in VM testing.
+	cmd.WaitDelay = 5 * time.Second
+	err := cmd.Run()
+	// ErrWaitDelay means the command itself exited 0 and only the inherited
+	// pipe stayed open — success for our purposes.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+		return &CmdError{Cmd: name + " " + strings.Join(args, " "), Output: out.String(), Err: err}
 	}
 	return nil
 }
