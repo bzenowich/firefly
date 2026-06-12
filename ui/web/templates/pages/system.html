@@ -18,10 +18,32 @@
    <span class="muted">— rendered live from the current config.</span></p>
 <h2>Interfaces</h2>
 <table>
-  <thead><tr><th>Name</th><th>Role</th><th>Device</th><th>Address</th></tr></thead>
+  <thead><tr><th>Name</th><th>Role</th><th>Device</th><th>Address</th><th></th></tr></thead>
   <tbody>
     {{range .Cfg.Interfaces}}
-    <tr><td>{{.Name}}</td><td>{{.Role}}</td><td>{{.Device}}</td><td>{{if .DHCPClient}}dhcp{{else}}{{.IPv4}}{{end}}</td></tr>
+    {{if eq .Name $.EditID}}
+    <tr>
+      <td colspan="5">
+        <form method="post" action="/system/interfaces/{{.Name}}" class="row-form">
+          <strong>{{.Name}}</strong>
+          <input name="device" value="{{.Device}}" size="8" placeholder="igc0" required>
+          <select name="mode">
+            <option value="static" {{if not .DHCPClient}}selected{{end}}>static</option>
+            <option value="dhcp" {{if .DHCPClient}}selected{{end}}>dhcp</option>
+          </select>
+          <input name="ipv4" value="{{.IPv4}}" size="18" placeholder="192.168.1.1/24">
+          <button type="submit">Save</button>
+          <a href="/system" class="button-link">Cancel</a>
+        </form>
+      </td>
+    </tr>
+    {{else}}
+    <tr>
+      <td>{{.Name}}</td><td>{{.Role}}</td><td>{{.Device}}</td>
+      <td>{{if .DHCPClient}}dhcp{{else}}{{.IPv4}}{{end}}</td>
+      <td class="actions"><a href="/system?edit={{.Name}}" class="button-link">Edit</a></td>
+    </tr>
+    {{end}}
     {{end}}
   </tbody>
 </table>

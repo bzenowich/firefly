@@ -143,3 +143,39 @@ func TestStoreUpdateRejectsInvalid(t *testing.T) {
 		t.Fatal("failed update must not change in-memory config")
 	}
 }
+
+func TestValidateInterfaces(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"valid", func(c *Config) {}, ""},
+		{"missing device", func(c *Config) { c.Interfaces[0].Device = "" }, "device is required"},
+		{"duplicate device", func(c *Config) { c.Interfaces[2].Device = c.Interfaces[1].Device }, "already assigned"},
+		{"dhcp and static", func(c *Config) { c.Interfaces[0].IPv4 = "10.0.0.2/24" }, "exclusive"},
+		{"bad cidr", func(c *Config) { c.Interfaces[1].IPv4 = "192.168.1.1" }, "must be CIDR"},
+		{"lan without address", func(c *Config) {
+			c.Interfaces[1].IPv4 = ""
+			c.DHCP.Enabled = false
+		}, "lan needs a static address"},
+		{"wan without address or dhcp", func(c *Config) { c.Interfaces[0].DHCPClient = false }, "wan needs dhcp"},
+		{"wan static ok", func(c *Config) {
+			c.Interfaces[0].DHCPClient = false
+			c.Interfaces[0].IPv4 = "203.0.113.2/24"
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

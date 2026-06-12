@@ -157,6 +157,9 @@ func (c *Config) Validate() error {
 	if roles["wan"] != 1 || roles["lan"] != 1 {
 		return errors.New("exactly one wan and one lan interface required")
 	}
+	if err := c.validateInterfaces(); err != nil {
+		return err
+	}
 	if err := c.NAT.validate(); err != nil {
 		return err
 	}
@@ -169,7 +172,35 @@ func (c *Config) Validate() error {
 	if err := c.validateUsers(); err != nil {
 		return err
 	}
-	// TODO: validate interface addresses.
+	return nil
+}
+
+func (c *Config) validateInterfaces() error {
+	devices := map[string]bool{}
+	for _, ifc := range c.Interfaces {
+		where := fmt.Sprintf("interface %s", ifc.Name)
+		if ifc.Device == "" {
+			return fmt.Errorf("%s: device is required", where)
+		}
+		if devices[ifc.Device] {
+			return fmt.Errorf("%s: device %s already assigned", where, ifc.Device)
+		}
+		devices[ifc.Device] = true
+		if ifc.DHCPClient && ifc.IPv4 != "" {
+			return fmt.Errorf("%s: dhcp client and static address are exclusive", where)
+		}
+		if ifc.IPv4 != "" {
+			if _, _, err := net.ParseCIDR(ifc.IPv4); err != nil {
+				return fmt.Errorf("%s: address must be CIDR (e.g. 192.168.1.1/24): %w", where, err)
+			}
+		}
+		if ifc.Role == "lan" && ifc.IPv4 == "" {
+			return fmt.Errorf("%s: lan needs a static address", where)
+		}
+		if ifc.Role == "wan" && !ifc.DHCPClient && ifc.IPv4 == "" {
+			return fmt.Errorf("%s: wan needs dhcp or a static address", where)
+		}
+	}
 	return nil
 }
 

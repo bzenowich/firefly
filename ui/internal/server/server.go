@@ -116,6 +116,7 @@ func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
 	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
+	s.mux.HandleFunc("POST /system/interfaces/{name}", s.handleInterfaceUpdate)
 	s.mux.HandleFunc("POST /system/apply", s.handleApply)
 	s.mux.HandleFunc("POST /system/apply/confirm", s.handleApplyConfirm)
 	s.mux.HandleFunc("POST /system/apply/rollback", s.handleApplyRollback)
@@ -431,6 +432,29 @@ func updateForward(id string, fn func(*config.PortForward)) func(*config.Config)
 		}
 		return errors.New("port forward not found")
 	}
+}
+
+// handleInterfaceUpdate edits one interface's device and addressing. Role
+// assignments are fixed at three (wan/lan/opt); only the mapping to hardware
+// and the address change here.
+func (s *Server) handleInterfaceUpdate(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	err := s.store.Update(func(c *config.Config) error {
+		for i := range c.Interfaces {
+			if c.Interfaces[i].Name != name {
+				continue
+			}
+			c.Interfaces[i].Device = strings.TrimSpace(r.FormValue("device"))
+			c.Interfaces[i].DHCPClient = r.FormValue("mode") == "dhcp"
+			c.Interfaces[i].IPv4 = ""
+			if !c.Interfaces[i].DHCPClient {
+				c.Interfaces[i].IPv4 = strings.TrimSpace(r.FormValue("ipv4"))
+			}
+			return nil
+		}
+		return fmt.Errorf("interface %s not found", name)
+	})
+	redirect(w, r, "/system", err)
 }
 
 // handleSetHostname is the first full vertical slice through the config
