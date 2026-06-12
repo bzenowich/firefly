@@ -292,13 +292,6 @@ func NewID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Apply renders the configuration into pf.conf, Unbound, Kea, and WireGuard
-// configs, validates them (pfctl -nf), and reloads the affected services with
-// a confirm-or-rollback window. Stubbed until the renderers land.
-func Apply(Config) error {
-	return errors.New("apply: renderers not implemented yet")
-}
-
 // Store is the on-disk config with serialized access. Writes are atomic
 // (temp file + rename) so a crash never leaves a torn config.
 type Store struct {

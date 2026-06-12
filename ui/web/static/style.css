@@ -80,6 +80,17 @@ th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: u
 .bad { color: var(--bad); }
 .mono { font-family: ui-monospace, monospace; font-size: 0.85em; }
 
+.flash-pending {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.5rem 0.8rem;
+}
+.flash-pending form { margin: 0; }
+
 .flash-error {
   background: color-mix(in srgb, var(--bad) 15%, var(--panel));
   border: 1px solid var(--bad);

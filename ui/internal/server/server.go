@@ -12,7 +12,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"firewall/ui/internal/apply"
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/render"
 	"firewall/ui/internal/system"
@@ -40,6 +42,7 @@ var pages = []Page{
 
 type Server struct {
 	store *config.Store
+	mgr   *apply.Manager
 	mux   *http.ServeMux
 	tmpls map[string]*template.Template // page path -> parsed set
 }
@@ -48,9 +51,10 @@ var funcs = template.FuncMap{
 	"humanBytes": humanBytes,
 }
 
-func New(store *config.Store) (*Server, error) {
+func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s := &Server{
 		store: store,
+		mgr:   mgr,
 		mux:   http.NewServeMux(),
 		tmpls: map[string]*template.Template{},
 	}
@@ -86,6 +90,9 @@ func New(store *config.Store) (*Server, error) {
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
 	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
+	s.mux.HandleFunc("POST /system/apply", s.handleApply)
+	s.mux.HandleFunc("POST /system/apply/confirm", s.handleApplyConfirm)
+	s.mux.HandleFunc("POST /system/apply/rollback", s.handleApplyRollback)
 
 	s.mux.HandleFunc("POST /nat/forwards", s.handleForwardCreate)
 	s.mux.HandleFunc("POST /nat/forwards/{id}", s.handleForwardUpdate)
@@ -110,6 +117,9 @@ type pageData struct {
 	Stats  system.Stats
 	Error  string // flash message carried via ?err=
 	EditID string // list entry being edited inline, via ?edit=
+
+	ApplyPending  bool // an unconfirmed apply is live
+	ApplyDeadline time.Time
 }
 
 func (s *Server) data(p Page, r *http.Request) pageData {
@@ -124,6 +134,7 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		d.Error = r.URL.Query().Get("err")
 		d.EditID = r.URL.Query().Get("edit")
 	}
+	d.ApplyDeadline, d.ApplyPending = s.mgr.Pending()
 	return d
 }
 
@@ -161,6 +172,18 @@ func (s *Server) handlePFPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, out)
+}
+
+func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
+	redirect(w, r, "/system", s.mgr.Apply(s.store.Get()))
+}
+
+func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
+	redirect(w, r, "/system", s.mgr.Confirm())
+}
+
+func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
+	redirect(w, r, "/system", s.mgr.Rollback())
 }
 
 // parseForward reads port-forward form fields; semantic checks (port ranges,

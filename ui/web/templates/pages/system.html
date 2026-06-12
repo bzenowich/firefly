@@ -7,9 +7,15 @@
   </label>
   <button type="submit">Save</button>
 </form>
-<h2>Firewall ruleset</h2>
+<h2>Apply</h2>
+{{if not .ApplyPending}}
+<form method="post" action="/system/apply">
+  <button type="submit">Apply configuration</button>
+  <span class="muted">Validates, installs, and reloads services; rolls back automatically unless confirmed within the window.</span>
+</form>
+{{end}}
 <p><a href="/system/pf.conf" class="button-link">Preview generated pf.conf</a>
-   <span class="muted">— rendered live from the current config; apply pipeline lands with the FreeBSD image.</span></p>
+   <span class="muted">— rendered live from the current config.</span></p>
 <h2>Interfaces</h2>
 <table>
   <thead><tr><th>Name</th><th>Role</th><th>Device</th><th>Address</th></tr></thead>

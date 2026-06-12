@@ -4,6 +4,7 @@
 
 # dev runtime state
 fw.json
+/ui/devroot/
 
 # editor noise
 *.swp

@@ -4,10 +4,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"firewall/ui/internal/apply"
 	"firewall/ui/internal/config"
 )
 
@@ -17,7 +20,8 @@ func newTestServer(t *testing.T) (*Server, *config.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(store)
+	mgr := apply.New(apply.OSSystem{Root: filepath.Join(t.TempDir(), "root"), NoExec: true}, time.Minute)
+	srv, err := New(store, mgr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +121,52 @@ func TestPFPreview(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("pf.conf preview missing %q", want)
 		}
+	}
+}
+
+func TestApplyConfirmFlow(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	if loc := post(t, srv, "/system/apply", nil); loc.Query().Get("err") != "" {
+		t.Fatalf("apply failed: %s", loc.Query().Get("err"))
+	}
+
+	// Pending banner shows on every page until confirmed.
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), "auto-rollback") {
+		t.Error("pending banner missing")
+	}
+
+	if loc := post(t, srv, "/system/apply/confirm", nil); loc.Query().Get("err") != "" {
+		t.Fatalf("confirm failed: %s", loc.Query().Get("err"))
+	}
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if strings.Contains(w.Body.String(), "auto-rollback") {
+		t.Error("pending banner survived confirm")
+	}
+}
+
+func TestApplyWritesFiles(t *testing.T) {
+	store, err := config.Open(filepath.Join(t.TempDir(), "fw.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "root")
+	mgr := apply.New(apply.OSSystem{Root: root, NoExec: true}, 0)
+	srv, err := New(store, mgr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post(t, srv, "/system/apply", nil)
+	data, err := os.ReadFile(filepath.Join(root, "etc/pf.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "block in log all") {
+		t.Error("installed pf.conf missing ruleset")
 	}
 }
 

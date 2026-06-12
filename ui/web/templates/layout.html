@@ -20,6 +20,17 @@
       {{end}}
     </nav>
     <main>
+      {{if .ApplyPending}}
+      <div class="flash-pending">
+        Configuration applied — auto-rollback at {{.ApplyDeadline.Format "15:04:05"}} unless confirmed.
+        <form method="post" action="/system/apply/confirm">
+          <button type="submit">Keep changes</button>
+        </form>
+        <form method="post" action="/system/apply/rollback">
+          <button type="submit" class="secondary">Roll back now</button>
+        </form>
+      </div>
+      {{end}}
       {{if .Error}}<p class="flash-error">{{.Error}}</p>{{end}}
       {{template "content" .}}
     </main>

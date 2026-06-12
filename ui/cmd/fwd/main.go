@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
+	"firewall/ui/internal/apply"
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/server"
 )
@@ -20,6 +22,7 @@ import (
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "listen address")
 	confPath := flag.String("config", "fw.json", "path to config file")
+	window := flag.Duration("confirm-window", time.Minute, "auto-rollback window after apply (0 = no confirmation step)")
 	flag.Parse()
 
 	store, err := config.Open(*confPath)
@@ -27,7 +30,16 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	srv, err := server.New(store)
+	// Off-FreeBSD, apply renders into ./devroot and logs service commands
+	// instead of executing them, so the pipeline is exercisable on a dev box.
+	sys := apply.OSSystem{}
+	if runtime.GOOS != "freebsd" {
+		sys = apply.OSSystem{Root: "devroot", NoExec: true}
+		log.Printf("non-FreeBSD host: apply writes to ./devroot, commands logged only")
+	}
+	mgr := apply.New(sys, *window)
+
+	srv, err := server.New(store, mgr)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
