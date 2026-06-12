@@ -47,6 +47,70 @@
     {{end}}
   </tbody>
 </table>
-<!-- TODO: updates via boot environments, config backup/restore, users, certificates,
-     reboot/halt, opt-in web shell (ttyd) with warning -->
+<h2>Backup &amp; restore</h2>
+<p>
+  <a href="/system/backup" class="button-link">Download backup</a>
+  <span class="muted">— the complete appliance config, including credentials and keys. Store it safely.</span>
+</p>
+<form method="post" action="/system/restore" enctype="multipart/form-data" class="row-form">
+  <input type="file" name="backup" accept="application/json" required>
+  <button type="submit" class="danger">Restore</button>
+  <span class="muted">Replaces the entire config; apply afterwards to take effect.</span>
+</form>
+
+<h2>Users</h2>
+<table>
+  <thead><tr><th>Username</th><th>2FA</th><th></th></tr></thead>
+  <tbody>
+    {{range .Cfg.Users}}
+    <tr>
+      <td>{{.Username}}</td>
+      <td>{{if .TOTPSecret}}<span class="ok">enrolled</span>{{else}}<span class="muted">off</span>{{end}}</td>
+      <td class="actions">
+        {{if eq .Username $.EditID}}
+        <form method="post" action="/system/users/{{.Username}}/password" class="row-form">
+          <input type="password" name="password" placeholder="new password" minlength="8" required>
+          <input type="password" name="confirm" placeholder="confirm" minlength="8" required>
+          <button type="submit">Set password</button>
+          <a href="/system" class="button-link">Cancel</a>
+        </form>
+        {{else}}
+        <a href="/system?edit={{.Username}}" class="button-link">Change password</a>
+        <form method="post" action="/system/users/{{.Username}}/delete">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+<h3>Add user</h3>
+<form method="post" action="/system/users" class="row-form">
+  <label>Username <input name="username" required></label>
+  <label>Password <input type="password" name="password" minlength="8" required></label>
+  <button type="submit">Add</button>
+</form>
+
+<h2>Two-factor authentication ({{.User}})</h2>
+{{if .TOTPEnrolled}}
+<form method="post" action="/system/totp/disable" class="row-form">
+  <span class="ok">TOTP is active for your account.</span>
+  <button type="submit" class="danger">Disable</button>
+</form>
+{{else if .TOTPPending}}
+<p>Scan with your authenticator app, then enter the current code to finish enrollment:</p>
+<p><img src="/system/totp/qr.png" alt="TOTP enrollment QR" width="256" height="256"></p>
+<form method="post" action="/system/totp/confirm" class="row-form">
+  <input name="code" inputmode="numeric" pattern="[0-9]*" placeholder="123456" required>
+  <button type="submit">Confirm</button>
+</form>
+{{else}}
+<form method="post" action="/system/totp/begin" class="row-form">
+  <button type="submit">Enroll TOTP</button>
+  <span class="muted">Adds a 6-digit authenticator code to your login.</span>
+</form>
+{{end}}
+<!-- TODO: updates via boot environments, certificates, reboot/halt,
+     opt-in web shell (ttyd) with warning -->
 {{end}}

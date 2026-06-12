@@ -36,6 +36,8 @@ type Config struct {
 type User struct {
 	Username     string `json:"username"`
 	PasswordHash string `json:"password_hash"`
+	// TOTPSecret is the base32 RFC 6238 secret; empty = 2FA not enrolled.
+	TOTPSecret string `json:"totp_secret,omitempty"`
 }
 
 type System struct {
@@ -449,6 +451,15 @@ func (s *Store) Get() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg
+}
+
+// Replace swaps in a whole new config (restore-from-backup), validates, and
+// persists. Same discard-on-failure contract as Update.
+func (s *Store) Replace(next Config) error {
+	return s.Update(func(c *Config) error {
+		*c = next
+		return nil
+	})
 }
 
 // Update mutates the config under lock, validates, and persists. The mutation

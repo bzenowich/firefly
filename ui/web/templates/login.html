@@ -32,6 +32,9 @@
       <label>Password
         <input type="password" name="password" required autocomplete="current-password">
       </label>
+      <label>TOTP code <span class="muted">(if enrolled)</span>
+        <input name="totp" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code">
+      </label>
       <button type="submit">Log in</button>
     </form>
     {{end}}

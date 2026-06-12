@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"firewall/ui/internal/apply"
@@ -58,6 +59,9 @@ type Server struct {
 	logins    *auth.Limiter
 	tmpls     map[string]*template.Template // page path -> parsed set
 	loginTmpl *template.Template
+
+	totpMu      sync.Mutex
+	totpPending map[string]string // user -> secret awaiting confirmation
 }
 
 var funcs = template.FuncMap{
@@ -66,12 +70,13 @@ var funcs = template.FuncMap{
 
 func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s := &Server{
-		store:    store,
-		mgr:      mgr,
-		mux:      http.NewServeMux(),
-		sessions: auth.NewSessions(sessionTTL),
-		logins:   auth.NewLimiter(loginMaxFails, loginWindow),
-		tmpls:    map[string]*template.Template{},
+		store:       store,
+		mgr:         mgr,
+		mux:         http.NewServeMux(),
+		sessions:    auth.NewSessions(sessionTTL),
+		logins:      auth.NewLimiter(loginMaxFails, loginWindow),
+		tmpls:       map[string]*template.Template{},
+		totpPending: map[string]string{},
 	}
 
 	loginTmpl, err := template.ParseFS(web.FS, "templates/login.html")
@@ -129,6 +134,7 @@ func New(store *config.Store, mgr *apply.Manager) (*Server, error) {
 	s.routesDHCP()
 	s.routesDNS()
 	s.routesWireGuard()
+	s.routesSystem()
 
 	return s, nil
 }
@@ -213,15 +219,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Always run one argon2 verification, against DummyHash when the user
 	// does not exist, so timing does not reveal valid usernames.
-	hash, found := auth.DummyHash, false
+	hash, totpSecret, found := auth.DummyHash, "", false
 	for _, u := range s.store.Get().Users {
 		if u.Username == username {
-			hash, found = u.PasswordHash, true
+			hash, totpSecret, found = u.PasswordHash, u.TOTPSecret, true
 		}
 	}
 	if !auth.VerifyPassword(hash, r.FormValue("password")) || !found {
 		s.logins.Fail(ip)
 		redirect(w, r, "/login", errors.New("invalid username or password"))
+		return
+	}
+	if totpSecret != "" && !auth.VerifyTOTP(totpSecret, r.FormValue("totp")) {
+		s.logins.Fail(ip)
+		redirect(w, r, "/login", errors.New("invalid TOTP code"))
 		return
 	}
 
@@ -290,6 +301,9 @@ type pageData struct {
 
 	ApplyPending  bool // an unconfirmed apply is live
 	ApplyDeadline time.Time
+
+	TOTPEnrolled bool // logged-in user has 2FA active
+	TOTPPending  bool // enrollment QR awaiting confirmation
 }
 
 func (s *Server) data(p Page, r *http.Request) pageData {
@@ -304,6 +318,14 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		d.Error = r.URL.Query().Get("err")
 		d.EditID = r.URL.Query().Get("edit")
 		d.User, _ = r.Context().Value(userKey{}).(string)
+		for _, u := range d.Cfg.Users {
+			if u.Username == d.User {
+				d.TOTPEnrolled = u.TOTPSecret != ""
+			}
+		}
+		s.totpMu.Lock()
+		d.TOTPPending = s.totpPending[d.User] != ""
+		s.totpMu.Unlock()
 	}
 	d.ApplyDeadline, d.ApplyPending = s.mgr.Pending()
 	return d
