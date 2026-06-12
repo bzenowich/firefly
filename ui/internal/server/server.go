@@ -3,11 +3,15 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/system"
@@ -68,7 +72,7 @@ func New(store *config.Store) (*Server, error) {
 		}
 		p := p
 		s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			s.render(w, p)
+			s.render(w, r, p)
 		})
 	}
 
@@ -80,6 +84,11 @@ func New(store *config.Store) (*Server, error) {
 
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
+
+	s.mux.HandleFunc("POST /nat/forwards", s.handleForwardCreate)
+	s.mux.HandleFunc("POST /nat/forwards/{id}", s.handleForwardUpdate)
+	s.mux.HandleFunc("POST /nat/forwards/{id}/toggle", s.handleForwardToggle)
+	s.mux.HandleFunc("POST /nat/forwards/{id}/delete", s.handleForwardDelete)
 
 	return s, nil
 }
@@ -97,30 +106,127 @@ type pageData struct {
 	Nav    []Page
 	Cfg    config.Config
 	Stats  system.Stats
+	Error  string // flash message carried via ?err=
+	EditID string // list entry being edited inline, via ?edit=
 }
 
-func (s *Server) data(p Page) pageData {
-	return pageData{
+func (s *Server) data(p Page, r *http.Request) pageData {
+	d := pageData{
 		Title:  p.Title,
 		Active: p.Path,
 		Nav:    pages,
 		Cfg:    s.store.Get(),
 		Stats:  system.Collect(),
 	}
+	if r != nil {
+		d.Error = r.URL.Query().Get("err")
+		d.EditID = r.URL.Query().Get("edit")
+	}
+	return d
 }
 
-func (s *Server) render(w http.ResponseWriter, p Page) {
+func (s *Server) render(w http.ResponseWriter, r *http.Request, p Page) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpls[p.Path].Execute(w, s.data(p)); err != nil {
+	if err := s.tmpls[p.Path].Execute(w, s.data(p, r)); err != nil {
 		log.Printf("render %s: %v", p.Path, err)
 	}
+}
+
+// redirect sends the post-action redirect, carrying any error as a flash
+// message in the query string.
+func redirect(w http.ResponseWriter, r *http.Request, path string, err error) {
+	if err != nil {
+		path += "?err=" + url.QueryEscape(err.Error())
+	}
+	http.Redirect(w, r, path, http.StatusSeeOther)
 }
 
 // handleStatsPartial serves the dashboard stats fragment that htmx polls.
 func (s *Server) handleStatsPartial(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpls["/"].ExecuteTemplate(w, "stats", s.data(pages[0])); err != nil {
+	if err := s.tmpls["/"].ExecuteTemplate(w, "stats", s.data(pages[0], r)); err != nil {
 		log.Printf("render stats partial: %v", err)
+	}
+}
+
+// parseForward reads port-forward form fields; semantic checks (port ranges,
+// IP syntax, duplicates) are config.Validate's job.
+func parseForward(r *http.Request) (config.PortForward, error) {
+	wanPort, err := strconv.Atoi(r.FormValue("wan_port"))
+	if err != nil {
+		return config.PortForward{}, errors.New("wan port must be a number")
+	}
+	destPort, err := strconv.Atoi(r.FormValue("dest_port"))
+	if err != nil {
+		return config.PortForward{}, errors.New("destination port must be a number")
+	}
+	return config.PortForward{
+		Name:     strings.TrimSpace(r.FormValue("name")),
+		Proto:    r.FormValue("proto"),
+		WANPort:  wanPort,
+		DestIP:   strings.TrimSpace(r.FormValue("dest_ip")),
+		DestPort: destPort,
+		Enabled:  r.FormValue("enabled") == "on",
+	}, nil
+}
+
+func (s *Server) handleForwardCreate(w http.ResponseWriter, r *http.Request) {
+	pf, err := parseForward(r)
+	if err == nil {
+		pf.ID = config.NewID()
+		err = s.store.Update(func(c *config.Config) error {
+			c.NAT.PortForwards = append(c.NAT.PortForwards, pf)
+			return nil
+		})
+	}
+	redirect(w, r, "/nat", err)
+}
+
+func (s *Server) handleForwardUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	pf, err := parseForward(r)
+	if err == nil {
+		pf.ID = id
+		err = s.store.Update(updateForward(id, func(cur *config.PortForward) {
+			pf.Enabled = cur.Enabled // toggle owns this flag; edit form doesn't carry it
+			*cur = pf
+		}))
+	}
+	redirect(w, r, "/nat", err)
+}
+
+func (s *Server) handleForwardToggle(w http.ResponseWriter, r *http.Request) {
+	err := s.store.Update(updateForward(r.PathValue("id"), func(pf *config.PortForward) {
+		pf.Enabled = !pf.Enabled
+	}))
+	redirect(w, r, "/nat", err)
+}
+
+func (s *Server) handleForwardDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := s.store.Update(func(c *config.Config) error {
+		for i, pf := range c.NAT.PortForwards {
+			if pf.ID == id {
+				c.NAT.PortForwards = append(c.NAT.PortForwards[:i], c.NAT.PortForwards[i+1:]...)
+				return nil
+			}
+		}
+		return errors.New("port forward not found")
+	})
+	redirect(w, r, "/nat", err)
+}
+
+// updateForward builds a Store.Update mutation that applies fn to the forward
+// with the given id, or fails if it no longer exists.
+func updateForward(id string, fn func(*config.PortForward)) func(*config.Config) error {
+	return func(c *config.Config) error {
+		for i := range c.NAT.PortForwards {
+			if c.NAT.PortForwards[i].ID == id {
+				fn(&c.NAT.PortForwards[i])
+				return nil
+			}
+		}
+		return errors.New("port forward not found")
 	}
 }
 
@@ -132,11 +238,7 @@ func (s *Server) handleSetHostname(w http.ResponseWriter, r *http.Request) {
 		c.System.Hostname = hostname
 		return nil
 	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	http.Redirect(w, r, "/system", http.StatusSeeOther)
+	redirect(w, r, "/system", err)
 }
 
 func humanBytes(b uint64) string {

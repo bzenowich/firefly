@@ -80,9 +80,21 @@ th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: u
 .bad { color: var(--bad); }
 .mono { font-family: ui-monospace, monospace; font-size: 0.85em; }
 
+.flash-error {
+  background: color-mix(in srgb, var(--bad) 15%, var(--panel));
+  border: 1px solid var(--bad);
+  border-radius: 4px;
+  padding: 0.5rem 0.8rem;
+}
+
 form { margin: 0.6rem 0; }
+.row-form { display: flex; align-items: flex-end; gap: 0.6rem; flex-wrap: wrap; margin: 0; }
+.row-form label { margin: 0; }
+label.check { flex-direction: row; align-items: center; }
+.actions { display: flex; gap: 0.4rem; align-items: center; }
+.actions form { margin: 0; }
 label { display: inline-flex; flex-direction: column; gap: 0.25rem; margin-right: 0.8rem; }
-input {
+input, select {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -99,3 +111,13 @@ button {
   cursor: pointer;
 }
 button:hover { filter: brightness(1.1); }
+
+button.secondary { background: var(--border); color: var(--text); }
+button.danger { background: var(--bad); }
+.button-link {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 0.45rem 0.4rem;
+  font-weight: 600;
+}
+.button-link:hover { text-decoration: underline; }

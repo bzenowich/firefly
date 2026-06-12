@@ -1,18 +1,71 @@
 {{define "content"}}
 <h1>NAT</h1>
 <p class="muted">Outbound mode: {{.Cfg.NAT.OutboundMode}}</p>
+
 <h2>Port forwards</h2>
 {{if .Cfg.NAT.PortForwards}}
 <table>
-  <thead><tr><th>Name</th><th>Proto</th><th>WAN port</th><th>Destination</th><th>Enabled</th></tr></thead>
+  <thead><tr><th>Name</th><th>Proto</th><th>WAN port</th><th>Destination</th><th>Status</th><th></th></tr></thead>
   <tbody>
     {{range .Cfg.NAT.PortForwards}}
-    <tr><td>{{.Name}}</td><td>{{.Proto}}</td><td>{{.WANPort}}</td><td>{{.DestIP}}:{{.DestPort}}</td><td>{{.Enabled}}</td></tr>
+    {{if eq .ID $.EditID}}
+    <tr>
+      <td colspan="6">
+        <form method="post" action="/nat/forwards/{{.ID}}" class="row-form">
+          <input name="name" value="{{.Name}}" placeholder="name" required>
+          <select name="proto">
+            <option {{if eq .Proto "tcp"}}selected{{end}}>tcp</option>
+            <option {{if eq .Proto "udp"}}selected{{end}}>udp</option>
+            <option {{if eq .Proto "tcp/udp"}}selected{{end}}>tcp/udp</option>
+          </select>
+          <input name="wan_port" value="{{.WANPort}}" size="6" required>
+          <input name="dest_ip" value="{{.DestIP}}" size="15" required>
+          <input name="dest_port" value="{{.DestPort}}" size="6" required>
+          <button type="submit">Save</button>
+          <a href="/nat" class="button-link">Cancel</a>
+        </form>
+      </td>
+    </tr>
+    {{else}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td>{{.Proto}}</td>
+      <td>{{.WANPort}}</td>
+      <td>{{.DestIP}}:{{.DestPort}}</td>
+      <td>{{if .Enabled}}<span class="ok">enabled</span>{{else}}<span class="muted">disabled</span>{{end}}</td>
+      <td class="actions">
+        <a href="/nat?edit={{.ID}}" class="button-link">Edit</a>
+        <form method="post" action="/nat/forwards/{{.ID}}/toggle">
+          <button type="submit" class="secondary">{{if .Enabled}}Disable{{else}}Enable{{end}}</button>
+        </form>
+        <form method="post" action="/nat/forwards/{{.ID}}/delete">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
     {{end}}
   </tbody>
 </table>
 {{else}}
 <p class="muted">No port forwards configured.</p>
 {{end}}
-<!-- TODO: add/edit/delete forms, outbound NAT, 1:1 NAT -->
+
+<h2>Add port forward</h2>
+<form method="post" action="/nat/forwards" class="row-form">
+  <label>Name <input name="name" placeholder="web server" required></label>
+  <label>Proto
+    <select name="proto">
+      <option>tcp</option>
+      <option>udp</option>
+      <option>tcp/udp</option>
+    </select>
+  </label>
+  <label>WAN port <input name="wan_port" size="6" placeholder="443" required></label>
+  <label>Dest IP <input name="dest_ip" size="15" placeholder="192.168.1.10" required></label>
+  <label>Dest port <input name="dest_port" size="6" placeholder="443" required></label>
+  <label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
+  <button type="submit">Add</button>
+</form>
+<!-- TODO: outbound NAT rules, 1:1 NAT -->
 {{end}}

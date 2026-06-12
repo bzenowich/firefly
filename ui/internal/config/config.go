@@ -5,12 +5,16 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 )
 
@@ -45,6 +49,7 @@ type NAT struct {
 }
 
 type PortForward struct {
+	ID       string `json:"id"` // stable handle for edit/delete; survives reordering
 	Name     string `json:"name"`
 	Proto    string `json:"proto"` // tcp | udp | tcp/udp
 	WANPort  int    `json:"wan_port"`
@@ -140,8 +145,58 @@ func (c *Config) Validate() error {
 	if roles["wan"] != 1 || roles["lan"] != 1 {
 		return errors.New("exactly one wan and one lan interface required")
 	}
-	// TODO: validate addresses, port ranges, wireguard keys.
+	if err := c.NAT.validate(); err != nil {
+		return err
+	}
+	// TODO: validate interface addresses, DHCP ranges, wireguard keys.
 	return nil
+}
+
+func (n *NAT) validate() error {
+	ids := map[string]bool{}
+	ports := map[string]bool{}
+	for _, pf := range n.PortForwards {
+		where := fmt.Sprintf("port forward %q", pf.Name)
+		if pf.ID == "" {
+			return fmt.Errorf("%s: missing id", where)
+		}
+		if ids[pf.ID] {
+			return fmt.Errorf("%s: duplicate id %s", where, pf.ID)
+		}
+		ids[pf.ID] = true
+		if pf.Name == "" {
+			return fmt.Errorf("port forward %s: name is required", pf.ID)
+		}
+		switch pf.Proto {
+		case "tcp", "udp", "tcp/udp":
+		default:
+			return fmt.Errorf("%s: proto must be tcp, udp, or tcp/udp", where)
+		}
+		if pf.WANPort < 1 || pf.WANPort > 65535 {
+			return fmt.Errorf("%s: wan port must be 1-65535", where)
+		}
+		if pf.DestPort < 1 || pf.DestPort > 65535 {
+			return fmt.Errorf("%s: destination port must be 1-65535", where)
+		}
+		if net.ParseIP(pf.DestIP) == nil {
+			return fmt.Errorf("%s: invalid destination ip %q", where, pf.DestIP)
+		}
+		key := pf.Proto + "/" + strconv.Itoa(pf.WANPort)
+		if ports[key] {
+			return fmt.Errorf("%s: wan port %d/%s already forwarded", where, pf.WANPort, pf.Proto)
+		}
+		ports[key] = true
+	}
+	return nil
+}
+
+// NewID returns a short random identifier for config list entries.
+func NewID() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand failure is unrecoverable
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // Apply renders the configuration into pf.conf, Unbound, Kea, and WireGuard

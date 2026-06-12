@@ -20,6 +20,7 @@
       {{end}}
     </nav>
     <main>
+      {{if .Error}}<p class="flash-error">{{.Error}}</p>{{end}}
       {{template "content" .}}
     </main>
   </div>
