@@ -97,6 +97,29 @@ func TestForwardCRUD(t *testing.T) {
 	}
 }
 
+func TestPFPreview(t *testing.T) {
+	srv, store := newTestServer(t)
+	post(t, srv, "/nat/forwards", url.Values{
+		"name": {"web"}, "proto": {"tcp"}, "wan_port": {"443"},
+		"dest_ip": {"192.168.1.10"}, "dest_port": {"443"}, "enabled": {"on"},
+	})
+	if len(store.Get().NAT.PortForwards) != 1 {
+		t.Fatal("setup: forward not created")
+	}
+	req := httptest.NewRequest("GET", "/system/pf.conf", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"block in log all", "rdr on $wan_if", "192.168.1.10 port 443"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("pf.conf preview missing %q", want)
+		}
+	}
+}
+
 func TestPagesRender(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for _, p := range pages {

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/render"
 	"firewall/ui/internal/system"
 	"firewall/ui/web"
 )
@@ -83,6 +84,7 @@ func New(store *config.Store) (*Server, error) {
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
+	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
 
 	s.mux.HandleFunc("POST /nat/forwards", s.handleForwardCreate)
@@ -147,6 +149,18 @@ func (s *Server) handleStatsPartial(w http.ResponseWriter, r *http.Request) {
 	if err := s.tmpls["/"].ExecuteTemplate(w, "stats", s.data(pages[0], r)); err != nil {
 		log.Printf("render stats partial: %v", err)
 	}
+}
+
+// handlePFPreview serves the ruleset the current config renders to, before
+// any apply. Plain text — view-source for the firewall.
+func (s *Server) handlePFPreview(w http.ResponseWriter, r *http.Request) {
+	out, err := render.PF(s.store.Get())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, out)
 }
 
 // parseForward reads port-forward form fields; semantic checks (port ranges,
