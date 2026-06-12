@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -97,14 +98,16 @@ type WGTunnel struct {
 	Name       string   `json:"name"`
 	Address    string   `json:"address"` // CIDR
 	ListenPort int      `json:"listen_port"`
+	PrivateKey string   `json:"private_key"` // base64; generated via NewWGKeypair
 	Peers      []WGPeer `json:"peers"`
 }
 
 type WGPeer struct {
 	Name       string `json:"name"`
 	PublicKey  string `json:"public_key"`
-	AllowedIPs string `json:"allowed_ips"`
+	AllowedIPs string `json:"allowed_ips"` // comma-separated CIDRs
 	Endpoint   string `json:"endpoint,omitempty"`
+	Keepalive  int    `json:"keepalive,omitempty"` // seconds; for peers behind NAT
 }
 
 // Default returns the out-of-box configuration: LAN on 192.168.1.1/24 with
@@ -151,7 +154,50 @@ func (c *Config) Validate() error {
 	if err := c.validateDHCP(); err != nil {
 		return err
 	}
-	// TODO: validate interface addresses, wireguard keys.
+	if err := c.WireGuard.validate(); err != nil {
+		return err
+	}
+	// TODO: validate interface addresses.
+	return nil
+}
+
+func (wg *WireGuard) validate() error {
+	if !wg.Enabled {
+		return nil
+	}
+	ports := map[int]bool{}
+	for _, t := range wg.Tunnels {
+		where := fmt.Sprintf("wireguard tunnel %q", t.Name)
+		if t.Name == "" {
+			return errors.New("wireguard tunnel: name is required")
+		}
+		if _, _, err := net.ParseCIDR(t.Address); err != nil {
+			return fmt.Errorf("%s: address must be CIDR: %w", where, err)
+		}
+		if t.ListenPort < 1 || t.ListenPort > 65535 {
+			return fmt.Errorf("%s: listen port must be 1-65535", where)
+		}
+		if ports[t.ListenPort] {
+			return fmt.Errorf("%s: listen port %d already in use", where, t.ListenPort)
+		}
+		ports[t.ListenPort] = true
+		if !validWGKey(t.PrivateKey) {
+			return fmt.Errorf("%s: invalid private key", where)
+		}
+		for _, p := range t.Peers {
+			if !validWGKey(p.PublicKey) {
+				return fmt.Errorf("%s peer %q: invalid public key", where, p.Name)
+			}
+			if p.AllowedIPs == "" {
+				return fmt.Errorf("%s peer %q: allowed ips required", where, p.Name)
+			}
+			for _, cidr := range strings.Split(p.AllowedIPs, ",") {
+				if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+					return fmt.Errorf("%s peer %q: allowed ips: %w", where, p.Name, err)
+				}
+			}
+		}
+	}
 	return nil
 }
 
