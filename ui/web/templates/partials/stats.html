@@ -1,0 +1,31 @@
+{{define "stats"}}
+<div class="cards">
+  <div class="card">
+    <h3>System</h3>
+    <p>{{.Stats.Hostname}} · {{.Stats.OS}}</p>
+    <p class="muted">up {{.Stats.Uptime}}</p>
+  </div>
+  <div class="card">
+    <h3>Load</h3>
+    <p>{{printf "%.2f %.2f %.2f" .Stats.Load1 .Stats.Load5 .Stats.Load15}}</p>
+  </div>
+  <div class="card">
+    <h3>Memory</h3>
+    <p>{{humanBytes .Stats.MemAvail}} free of {{humanBytes .Stats.MemTotal}}</p>
+  </div>
+</div>
+<table>
+  <thead><tr><th>Interface</th><th>Status</th><th>RX</th><th>TX</th></tr></thead>
+  <tbody>
+    {{range .Stats.Ifaces}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td>{{if .Up}}<span class="ok">up</span>{{else}}<span class="bad">down</span>{{end}}</td>
+      <td>{{humanBytes .RxBytes}}</td>
+      <td>{{humanBytes .TxBytes}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+<p class="muted">collected {{.Stats.Collected.Format "15:04:05"}}</p>
+{{end}}

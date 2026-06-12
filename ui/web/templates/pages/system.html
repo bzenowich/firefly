@@ -1,0 +1,21 @@
+{{define "content"}}
+<h1>System</h1>
+<h2>Identification</h2>
+<form method="post" action="/system/hostname">
+  <label>Hostname
+    <input name="hostname" value="{{.Cfg.System.Hostname}}" required>
+  </label>
+  <button type="submit">Save</button>
+</form>
+<h2>Interfaces</h2>
+<table>
+  <thead><tr><th>Name</th><th>Role</th><th>Device</th><th>Address</th></tr></thead>
+  <tbody>
+    {{range .Cfg.Interfaces}}
+    <tr><td>{{.Name}}</td><td>{{.Role}}</td><td>{{.Device}}</td><td>{{if .DHCPClient}}dhcp{{else}}{{.IPv4}}{{end}}</td></tr>
+    {{end}}
+  </tbody>
+</table>
+<!-- TODO: updates via boot environments, config backup/restore, users, certificates,
+     reboot/halt, opt-in web shell (ttyd) with warning -->
+{{end}}

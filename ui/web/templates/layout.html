@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · firewall</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+  <header>
+    <span class="brand">firewall</span><!-- TODO: product name (plan.md §12) -->
+    <span class="host">{{.Cfg.System.Hostname}}.{{.Cfg.System.Domain}}</span>
+  </header>
+  <div class="wrap">
+    <nav>
+      {{$active := .Active}}
+      {{range .Nav}}
+      <a href="{{.Path}}" {{if eq .Path $active}}class="active"{{end}}>{{.Title}}</a>
+      {{end}}
+    </nav>
+    <main>
+      {{template "content" .}}
+    </main>
+  </div>
+</body>
+</html>

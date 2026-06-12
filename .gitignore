@@ -1,0 +1,10 @@
+# build artifacts
+/ui/fwd
+/dist/
+
+# dev runtime state
+fw.json
+
+# editor noise
+*.swp
+.DS_Store

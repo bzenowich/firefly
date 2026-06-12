@@ -1,0 +1,21 @@
+{{define "content"}}
+<h1>DNS</h1>
+<p>Resolver: {{if .Cfg.DNS.Enabled}}<span class="ok">enabled</span>{{else}}<span class="bad">disabled</span>{{end}}
+   · Adblock: {{if .Cfg.DNS.Adblock.Enabled}}<span class="ok">on</span>{{else}}<span class="muted">off</span>{{end}}</p>
+<h2>Blocklists</h2>
+{{if .Cfg.DNS.Adblock.Lists}}
+<ul>{{range .Cfg.DNS.Adblock.Lists}}<li>{{.}}</li>{{end}}</ul>
+{{else}}
+<p class="muted">No blocklists configured.</p>
+{{end}}
+<h2>Host overrides</h2>
+{{if .Cfg.DNS.Overrides}}
+<table>
+  <thead><tr><th>Host</th><th>IP</th></tr></thead>
+  <tbody>{{range .Cfg.DNS.Overrides}}<tr><td>{{.Host}}</td><td>{{.IP}}</td></tr>{{end}}</tbody>
+</table>
+{{else}}
+<p class="muted">No overrides configured.</p>
+{{end}}
+<!-- TODO: blocklist add/remove + refresh, per-list block stats, unbound settings -->
+{{end}}

@@ -1,0 +1,18 @@
+{{define "content"}}
+<h1>NAT</h1>
+<p class="muted">Outbound mode: {{.Cfg.NAT.OutboundMode}}</p>
+<h2>Port forwards</h2>
+{{if .Cfg.NAT.PortForwards}}
+<table>
+  <thead><tr><th>Name</th><th>Proto</th><th>WAN port</th><th>Destination</th><th>Enabled</th></tr></thead>
+  <tbody>
+    {{range .Cfg.NAT.PortForwards}}
+    <tr><td>{{.Name}}</td><td>{{.Proto}}</td><td>{{.WANPort}}</td><td>{{.DestIP}}:{{.DestPort}}</td><td>{{.Enabled}}</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No port forwards configured.</p>
+{{end}}
+<!-- TODO: add/edit/delete forms, outbound NAT, 1:1 NAT -->
+{{end}}

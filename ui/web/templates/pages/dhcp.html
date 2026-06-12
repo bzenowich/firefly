@@ -1,0 +1,19 @@
+{{define "content"}}
+<h1>DHCP</h1>
+<p>Server: {{if .Cfg.DHCP.Enabled}}<span class="ok">enabled</span>{{else}}<span class="bad">disabled</span>{{end}}
+   · pool {{.Cfg.DHCP.RangeStart}} – {{.Cfg.DHCP.RangeEnd}} · lease {{.Cfg.DHCP.LeaseSeconds}}s</p>
+<h2>Static leases</h2>
+{{if .Cfg.DHCP.StaticLeases}}
+<table>
+  <thead><tr><th>MAC</th><th>IP</th><th>Hostname</th></tr></thead>
+  <tbody>
+    {{range .Cfg.DHCP.StaticLeases}}
+    <tr><td>{{.MAC}}</td><td>{{.IP}}</td><td>{{.Hostname}}</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No static leases configured.</p>
+{{end}}
+<!-- TODO: pool/lease editing, active lease table from Kea -->
+{{end}}

@@ -1,0 +1,101 @@
+:root {
+  --bg: #14181d;
+  --panel: #1c2229;
+  --border: #2b343e;
+  --text: #d8dee6;
+  --muted: #7d8a99;
+  --accent: #4aa3ff;
+  --ok: #4ec77a;
+  --bad: #e0635c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.6rem 1.2rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.host { color: var(--muted); font-size: 0.85rem; }
+
+.wrap { display: flex; min-height: calc(100vh - 3rem); }
+
+nav {
+  display: flex;
+  flex-direction: column;
+  width: 11rem;
+  padding: 1rem 0;
+  border-right: 1px solid var(--border);
+}
+
+nav a {
+  color: var(--text);
+  text-decoration: none;
+  padding: 0.45rem 1.2rem;
+}
+
+nav a:hover { background: var(--panel); }
+nav a.active { background: var(--panel); border-left: 3px solid var(--accent); padding-left: calc(1.2rem - 3px); }
+
+main { flex: 1; padding: 1.2rem 1.6rem; max-width: 70rem; }
+
+h1 { font-size: 1.3rem; margin-top: 0; }
+h2 { font-size: 1.05rem; margin-top: 1.6rem; }
+h3 { font-size: 0.8rem; margin: 0 0 0.3rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+
+.cards { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.2rem; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  min-width: 12rem;
+}
+.card p { margin: 0.2rem 0; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.4rem 0.7rem; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+
+.muted { color: var(--muted); }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.mono { font-family: ui-monospace, monospace; font-size: 0.85em; }
+
+form { margin: 0.6rem 0; }
+label { display: inline-flex; flex-direction: column; gap: 0.25rem; margin-right: 0.8rem; }
+input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 0.35rem 0.6rem;
+}
+button {
+  background: var(--accent);
+  border: 0;
+  border-radius: 4px;
+  color: #0b1016;
+  font-weight: 600;
+  padding: 0.45rem 1rem;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.1); }

@@ -1,0 +1,20 @@
+{{define "content"}}
+<h1>WireGuard</h1>
+<p>{{if .Cfg.WireGuard.Enabled}}<span class="ok">enabled</span>{{else}}<span class="bad">disabled</span>{{end}}</p>
+{{if .Cfg.WireGuard.Tunnels}}
+{{range .Cfg.WireGuard.Tunnels}}
+<h2>{{.Name}} · {{.Address}} · :{{.ListenPort}}</h2>
+<table>
+  <thead><tr><th>Peer</th><th>Public key</th><th>Allowed IPs</th><th>Endpoint</th></tr></thead>
+  <tbody>
+    {{range .Peers}}
+    <tr><td>{{.Name}}</td><td class="mono">{{.PublicKey}}</td><td>{{.AllowedIPs}}</td><td>{{.Endpoint}}</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{else}}
+<p class="muted">No tunnels configured.</p>
+{{end}}
+<!-- TODO: tunnel/peer CRUD, key generation, mobile-client QR codes, live handshake status from wg(8) -->
+{{end}}
