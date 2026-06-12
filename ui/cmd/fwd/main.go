@@ -4,23 +4,28 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
 
 	"firewall/ui/internal/apply"
+	"firewall/ui/internal/cert"
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/server"
 )
 
 func main() {
-	listen := flag.String("listen", "127.0.0.1:8080", "listen address")
+	listen := flag.String("listen", "127.0.0.1:8443", "HTTPS listen address")
+	httpListen := flag.String("http", "", "optional HTTP listen address that redirects to HTTPS (e.g. :80)")
 	confPath := flag.String("config", "fw.json", "path to config file")
 	window := flag.Duration("confirm-window", time.Minute, "auto-rollback window after apply (0 = no confirmation step)")
 	flag.Parse()
@@ -28,6 +33,23 @@ func main() {
 	store, err := config.Open(*confPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+
+	// Self-signed TLS identity lives next to the config file; generated at
+	// first boot, stable afterwards so the browser exception sticks.
+	dir := filepath.Dir(*confPath)
+	cfg := store.Get()
+	var ips []net.IP
+	if lan := cfg.LAN(); lan.IPv4 != "" {
+		if ip, _, err := net.ParseCIDR(lan.IPv4); err == nil {
+			ips = append(ips, ip)
+		}
+	}
+	ips = append(ips, net.ParseIP("127.0.0.1"))
+	tlsCert, err := cert.Ensure(filepath.Join(dir, "fw-cert.pem"), filepath.Join(dir, "fw-key.pem"),
+		cfg.System.Hostname, ips)
+	if err != nil {
+		log.Fatalf("tls: %v", err)
 	}
 
 	// Off-FreeBSD, apply renders into ./devroot and logs service commands
@@ -47,16 +69,31 @@ func main() {
 	httpSrv := &http.Server{
 		Addr:         *listen,
 		Handler:      srv,
+		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12},
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 
 	go func() {
-		log.Printf("fwd listening on http://%s", *listen)
-		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("fwd listening on https://%s", *listen)
+		if err := httpSrv.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
 	}()
+
+	if *httpListen != "" {
+		_, port, _ := net.SplitHostPort(*listen)
+		go func() {
+			err := http.ListenAndServe(*httpListen, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				host, _, err := net.SplitHostPort(r.Host)
+				if err != nil {
+					host = r.Host
+				}
+				http.Redirect(w, r, "https://"+net.JoinHostPort(host, port)+r.URL.RequestURI(), http.StatusMovedPermanently)
+			}))
+			log.Fatalf("http redirect listener: %v", err)
+		}()
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
