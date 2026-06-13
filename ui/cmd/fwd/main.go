@@ -22,6 +22,7 @@ import (
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/logs"
 	"firewall/ui/internal/server"
+	"firewall/ui/internal/traffic"
 )
 
 func main() {
@@ -75,7 +76,16 @@ func main() {
 		logs.NewCollector(logStore).Run(collectCtx)
 	}
 
-	srv, err := server.New(store, mgr, logStore)
+	// Throughput history for the Traffic page. The sampler reads kernel byte
+	// counters cross-platform, so it runs on the dev box too.
+	trafStore, err := traffic.Open(filepath.Join(dir, "fw-traffic.db"))
+	if err != nil {
+		log.Fatalf("traffic: %v", err)
+	}
+	defer trafStore.Close()
+	go traffic.NewSampler(trafStore).Run(collectCtx)
+
+	srv, err := server.New(store, mgr, logStore, trafStore)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}

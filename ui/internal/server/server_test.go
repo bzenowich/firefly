@@ -13,6 +13,7 @@ import (
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/logs"
+	"firewall/ui/internal/traffic"
 )
 
 // client wraps a Server with the session cookie obtained from first-run
@@ -29,7 +30,7 @@ func newTestServer(t *testing.T) (*client, *config.Store) {
 		t.Fatal(err)
 	}
 	mgr := apply.New(apply.OSSystem{Root: filepath.Join(t.TempDir(), "root"), NoExec: true}, time.Minute)
-	srv, err := New(store, mgr, newTestLogStore(t))
+	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +47,16 @@ func newTestLogStore(t *testing.T) *logs.Store {
 	}
 	t.Cleanup(func() { ls.Close() })
 	return ls
+}
+
+func newTestTrafficStore(t *testing.T) *traffic.Store {
+	t.Helper()
+	ts, err := traffic.Open(filepath.Join(t.TempDir(), "traffic.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ts.Close() })
+	return ts
 }
 
 // setup runs first-run admin creation and returns the session cookie.
@@ -143,7 +154,7 @@ func TestFirstRunSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), newTestLogStore(t))
+	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), newTestLogStore(t), newTestTrafficStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +371,7 @@ func TestApplyWritesFiles(t *testing.T) {
 	}
 	root := filepath.Join(t.TempDir(), "root")
 	mgr := apply.New(apply.OSSystem{Root: root, NoExec: true}, 0)
-	srv, err := New(store, mgr, newTestLogStore(t))
+	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}

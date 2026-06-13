@@ -27,7 +27,45 @@ type Config struct {
 	DHCP       DHCP        `json:"dhcp"`
 	DNS        DNS         `json:"dns"`
 	WireGuard  WireGuard   `json:"wireguard"`
+	Shell      Shell       `json:"shell"`
 	Users      []User      `json:"users"`
+}
+
+// Shell configures the web terminal (docs/shell.md). It is dark by default:
+// with Enabled false there is no /shell route, no nav entry, and no listener,
+// so a fresh appliance ships with no web-shell attack surface. SSH remains the
+// recommended admin path.
+type Shell struct {
+	Enabled     bool   `json:"enabled"`      // master switch; false => feature off
+	Shell       string `json:"shell"`        // login shell; "" => /bin/sh
+	User        string `json:"user"`         // target unix user; "" => current/root
+	IdleTimeout int    `json:"idle_timeout"` // seconds of no I/O before kill; 0 => 15m
+	MaxSessions int    `json:"max_sessions"` // concurrent ttys; 0 => 1
+}
+
+// IdleSeconds returns the effective idle timeout, applying the 15-minute
+// default when unset.
+func (s Shell) IdleSeconds() int {
+	if s.IdleTimeout <= 0 {
+		return 15 * 60
+	}
+	return s.IdleTimeout
+}
+
+// Sessions returns the effective concurrency cap (default 1).
+func (s Shell) Sessions() int {
+	if s.MaxSessions <= 0 {
+		return 1
+	}
+	return s.MaxSessions
+}
+
+// Command returns the shell binary to exec, defaulting to /bin/sh.
+func (s Shell) Command() string {
+	if s.Shell == "" {
+		return "/bin/sh"
+	}
+	return s.Shell
 }
 
 // User is a WebUI login. The hash is an argon2id PHC string (see the auth
@@ -106,10 +144,10 @@ type WireGuard struct {
 }
 
 type WGTunnel struct {
-	Name       string   `json:"name"`
-	Address    string   `json:"address"` // CIDR
-	ListenPort int      `json:"listen_port"`
-	PrivateKey string   `json:"private_key"` // base64; generated via NewWGKeypair
+	Name       string `json:"name"`
+	Address    string `json:"address"` // CIDR
+	ListenPort int    `json:"listen_port"`
+	PrivateKey string `json:"private_key"` // base64; generated via NewWGKeypair
 	// EndpointHost is the public host[:port] mobile clients dial; it goes
 	// into generated peer configs. Port defaults to ListenPort.
 	EndpointHost string   `json:"endpoint_host,omitempty"`

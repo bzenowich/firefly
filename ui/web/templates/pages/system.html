@@ -111,6 +111,20 @@
   <span class="muted">Adds a 6-digit authenticator code to your login.</span>
 </form>
 {{end}}
-<!-- TODO: updates via boot environments, certificates, reboot/halt,
-     opt-in web shell (ttyd) with warning -->
+<h2>Web shell</h2>
+<p class="muted">
+  A browser terminal with the configured shell privileges. Off by default and
+  not recommended — use <span class="mono">ssh</span> for administration. When
+  enabled, a <strong>Shell</strong> entry appears in the nav and every session
+  is audited.
+</p>
+<form method="post" action="/system/shell" class="row-form">
+  <label class="check">
+    <input type="checkbox" name="enabled" {{if .Cfg.Shell.Enabled}}checked{{end}}>
+    Enable web shell
+  </label>
+  <button type="submit" class="danger">Save</button>
+</form>
+
+<!-- TODO: updates via boot environments, certificates, reboot/halt -->
 {{end}}

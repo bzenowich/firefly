@@ -1,5 +1,174 @@
 {{define "content"}}
 <h1>Traffic</h1>
-<p class="muted">Live and historical per-interface graphs land here: counters sampled to SQLite, rendered with uPlot.</p>
-<!-- TODO: sampler goroutine -> SQLite ring buffer; /api/traffic JSON; uPlot day/week/month views -->
+<p class="muted">Per-interface throughput, sampled every few seconds into a SQLite ring buffer.</p>
+
+<div class="traffic-ranges">
+  <button type="button" data-range="hour" class="secondary active">Hour</button>
+  <button type="button" data-range="day" class="secondary">Day</button>
+  <button type="button" data-range="week" class="secondary">Week</button>
+  <button type="button" data-range="month" class="secondary">Month</button>
+</div>
+
+<div id="charts"></div>
+<p class="muted" id="traffic-status">loading…</p>
+
+<script>
+(function () {
+  "use strict";
+  var range = "hour";
+  // Refresh cadence per range: tight for the live hour view, relaxed for the
+  // historical ones where buckets are minutes-to-hours wide.
+  var refreshMs = { hour: 5000, day: 30000, week: 60000, month: 60000 };
+  var timer = null;
+
+  var css = getComputedStyle(document.documentElement);
+  var COL = {
+    rx: css.getPropertyValue("--accent").trim() || "#4aa3ff",
+    tx: css.getPropertyValue("--ok").trim() || "#4ec77a",
+    grid: css.getPropertyValue("--border").trim() || "#2b343e",
+    muted: css.getPropertyValue("--muted").trim() || "#7d8a99",
+    panel: css.getPropertyValue("--panel").trim() || "#1c2229"
+  };
+
+  function fmtRate(bps) {
+    var u = ["B", "K", "M", "G", "T"], i = 0;
+    while (bps >= 1024 && i < u.length - 1) { bps /= 1024; i++; }
+    return (i === 0 ? bps.toFixed(0) : bps.toFixed(1)) + " " + u[i] + "/s";
+  }
+
+  function fmtTime(t, span) {
+    var d = new Date(t * 1000);
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    if (span <= 86400) return p(d.getHours()) + ":" + p(d.getMinutes());
+    return (d.getMonth() + 1) + "/" + d.getDate();
+  }
+
+  // draw renders one interface's series onto a canvas: rx and tx as filled
+  // lines, a peak gridline, and a few time ticks. Pure 2D canvas — no chart
+  // library, so the appliance stays a single offline binary.
+  function draw(canvas, series, step) {
+    var dpr = window.devicePixelRatio || 1;
+    var W = canvas.clientWidth, H = canvas.clientHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    var ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, W, H);
+
+    var padL = 64, padR = 10, padT = 10, padB = 22;
+    var pts = series.points || [];
+    var peak = 1;
+    for (var i = 0; i < pts.length; i++) peak = Math.max(peak, pts[i].rx, pts[i].tx);
+    var span = pts.length ? (pts[pts.length - 1].t - pts[0].t) || step : step;
+    var t0 = pts.length ? pts[0].t : 0;
+
+    var x = function (t) { return padL + (span ? (t - t0) / span : 0) * (W - padL - padR); };
+    var y = function (v) { return padT + (1 - v / peak) * (H - padT - padB); };
+
+    // horizontal gridlines + y labels (0, half, peak)
+    ctx.strokeStyle = COL.grid; ctx.fillStyle = COL.muted;
+    ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "right";
+    ctx.textBaseline = "middle"; ctx.lineWidth = 1;
+    [0, 0.5, 1].forEach(function (f) {
+      var yy = padT + (1 - f) * (H - padT - padB);
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(W - padR, yy); ctx.stroke();
+      ctx.fillText(fmtRate(peak * f), padL - 6, yy);
+    });
+
+    // x time ticks
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    if (pts.length) {
+      for (var k = 0; k <= 4; k++) {
+        var tt = t0 + (span * k / 4);
+        ctx.fillText(fmtTime(tt, span), x(tt), H - padB + 4);
+      }
+    }
+
+    if (pts.length < 2) {
+      ctx.fillStyle = COL.muted; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("collecting samples…", (padL + W) / 2, (padT + H - padB) / 2);
+      return;
+    }
+
+    var line = function (key, color) {
+      ctx.beginPath();
+      ctx.moveTo(x(pts[0].t), y(pts[0][key]));
+      for (var i = 1; i < pts.length; i++) ctx.lineTo(x(pts[i].t), y(pts[i][key]));
+      // fill under the curve
+      ctx.lineTo(x(pts[pts.length - 1].t), y(0));
+      ctx.lineTo(x(pts[0].t), y(0));
+      ctx.closePath();
+      ctx.fillStyle = color + "22"; ctx.fill();
+      // stroke the top edge
+      ctx.beginPath();
+      ctx.moveTo(x(pts[0].t), y(pts[0][key]));
+      for (var j = 1; j < pts.length; j++) ctx.lineTo(x(pts[j].t), y(pts[j][key]));
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+    };
+    line("rx", COL.rx);
+    line("tx", COL.tx);
+  }
+
+  function render(data) {
+    var box = document.getElementById("charts");
+    var have = {};
+    (data.series || []).forEach(function (s) {
+      have[s.iface] = true;
+      var card = document.getElementById("chart-" + s.iface);
+      if (!card) {
+        card = document.createElement("div");
+        card.className = "card chart-card";
+        card.id = "chart-" + s.iface;
+        card.innerHTML =
+          '<h3>' + s.iface + ' ' +
+          '<span class="legend"><i style="background:' + COL.rx + '"></i>in ' +
+          '<i style="background:' + COL.tx + '"></i>out</span></h3>' +
+          '<canvas></canvas>';
+        box.appendChild(card);
+      }
+      draw(card.querySelector("canvas"), s, data.step);
+    });
+    // drop charts for interfaces no longer present
+    Array.prototype.forEach.call(box.children, function (c) {
+      var name = c.id.slice("chart-".length);
+      if (!have[name]) c.remove();
+    });
+    if (!box.children.length) box.innerHTML = '<p class="muted">No samples yet.</p>';
+  }
+
+  function load() {
+    fetch("/api/traffic?range=" + range, { headers: { "HX-Request": "true" } })
+      .then(function (r) {
+        if (r.status === 401) { window.location = "/login"; return null; }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data) return;
+        render(data);
+        document.getElementById("traffic-status").textContent =
+          "updated " + new Date().toLocaleTimeString();
+      })
+      .catch(function (e) {
+        document.getElementById("traffic-status").textContent = "error: " + e.message;
+      });
+  }
+
+  function schedule() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(load, refreshMs[range] || 30000);
+  }
+
+  document.querySelectorAll(".traffic-ranges button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      range = b.dataset.range;
+      document.querySelectorAll(".traffic-ranges button").forEach(function (x) {
+        x.classList.toggle("active", x === b);
+      });
+      load(); schedule();
+    });
+  });
+  window.addEventListener("resize", load);
+  load(); schedule();
+})();
+</script>
 {{end}}

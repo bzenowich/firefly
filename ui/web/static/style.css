@@ -152,3 +152,24 @@ main.login h1 { margin-bottom: 1rem; }
 main.login label { display: flex; margin: 0 0 0.8rem; }
 main.login input { width: 100%; }
 main.login button { width: 100%; margin-top: 0.4rem; }
+
+/* Traffic page */
+.traffic-ranges { display: flex; gap: 0.4rem; margin: 0.8rem 0 1rem; }
+.traffic-ranges button { padding: 0.3rem 0.8rem; }
+.traffic-ranges button.active { background: var(--accent); color: #0b1016; }
+.chart-card { min-width: 0; margin-bottom: 1rem; }
+.chart-card canvas { width: 100%; height: 160px; display: block; }
+.chart-card h3 { display: flex; align-items: center; gap: 0.5rem; }
+.chart-card .legend { display: inline-flex; align-items: center; gap: 0.3rem; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
+.chart-card .legend i { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: inline-block; margin-left: 0.4rem; }
+
+/* Shell page */
+.shell-warn { margin-bottom: 1rem; }
+.shell-term {
+  height: 70vh;
+  background: #14181d;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem;
+}
+#shell-status { margin-top: 0.5rem; font-size: 0.85rem; }

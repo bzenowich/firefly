@@ -24,6 +24,27 @@ func (s *Server) routesSystem() {
 	s.mux.HandleFunc("GET /system/totp/qr.png", s.handleTOTPQR)
 	s.mux.HandleFunc("POST /system/totp/confirm", s.handleTOTPConfirm)
 	s.mux.HandleFunc("POST /system/totp/disable", s.handleTOTPDisable)
+	s.mux.HandleFunc("POST /system/shell", s.handleShellToggle)
+}
+
+// handleShellToggle flips the web-shell master switch. It is a UI-service
+// setting, not a packet-path one, so it takes effect immediately via
+// Store.Update without the apply/rollback pipeline (docs/shell.md §3).
+func (s *Server) handleShellToggle(w http.ResponseWriter, r *http.Request) {
+	enable := r.FormValue("enabled") == "on"
+	err := s.store.Update(func(c *config.Config) error {
+		c.Shell.Enabled = enable
+		return nil
+	})
+	if err == nil {
+		state := "disabled"
+		if enable {
+			state = "enabled"
+		}
+		user, _ := r.Context().Value(userKey{}).(string)
+		s.auditShell("config %s by user=%s from=%s", state, user, remoteIP(r))
+	}
+	redirect(w, r, "/system", err)
 }
 
 // handleBackup downloads the whole config document. The single JSON file is

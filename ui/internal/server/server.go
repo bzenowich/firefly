@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -23,6 +24,7 @@ import (
 	"firewall/ui/internal/logs"
 	"firewall/ui/internal/render"
 	"firewall/ui/internal/system"
+	"firewall/ui/internal/traffic"
 	"firewall/ui/web"
 )
 
@@ -32,8 +34,8 @@ type Page struct {
 	tmpl  string // template file under templates/pages/
 }
 
-// Nav order matches plan.md §7. Shell is intentionally absent until the
-// off-by-default ttyd integration lands.
+// Nav order matches plan.md §7. The Shell entry lives in shellPage (shell.go)
+// and is appended to the nav per-request only when Shell.Enabled.
 var pages = []Page{
 	{Path: "/", Title: "Dashboard", tmpl: "dashboard.html"},
 	{Path: "/nat", Title: "NAT", tmpl: "nat.html"},
@@ -56,6 +58,7 @@ type Server struct {
 	store     *config.Store
 	mgr       *apply.Manager
 	logStore  *logs.Store
+	traffic   *traffic.Store
 	mux       *http.ServeMux
 	sessions  *auth.Sessions
 	logins    *auth.Limiter
@@ -64,17 +67,21 @@ type Server struct {
 
 	totpMu      sync.Mutex
 	totpPending map[string]string // user -> secret awaiting confirmation
+
+	shellMu     sync.Mutex
+	shellActive int // live web-shell sessions, capped by Shell.MaxSessions
 }
 
 var funcs = template.FuncMap{
 	"humanBytes": humanBytes,
 }
 
-func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store) (*Server, error) {
+func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStore *traffic.Store) (*Server, error) {
 	s := &Server{
 		store:       store,
 		mgr:         mgr,
 		logStore:    logStore,
+		traffic:     trafStore,
 		mux:         http.NewServeMux(),
 		sessions:    auth.NewSessions(sessionTTL),
 		logins:      auth.NewLimiter(loginMaxFails, loginWindow),
@@ -110,6 +117,20 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store) (*Server
 		})
 	}
 
+	// The web shell is parsed and routed unconditionally; the handlers and the
+	// nav both gate on Shell.Enabled at request time (docs/shell.md §9).
+	shellTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(web.FS,
+		"templates/layout.html",
+		"templates/partials/*.html",
+		"templates/pages/"+shellPage.tmpl,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", shellPage.tmpl, err)
+	}
+	s.tmpls[shellPage.Path] = shellTmpl
+	s.mux.HandleFunc("GET /shell", s.handleShellPage)
+	s.mux.HandleFunc("GET /shell/ws", s.handleShellWS)
+
 	static, err := fs.Sub(web.FS, "static")
 	if err != nil {
 		return nil, err
@@ -123,6 +144,7 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store) (*Server
 
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
 	s.mux.HandleFunc("GET /partials/logs", s.handleLogsPartial)
+	s.mux.HandleFunc("GET /api/traffic", s.handleTrafficAPI)
 	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
 	s.mux.HandleFunc("POST /system/interfaces/{name}", s.handleInterfaceUpdate)
@@ -314,11 +336,16 @@ type pageData struct {
 }
 
 func (s *Server) data(p Page, r *http.Request) pageData {
+	cfg := s.store.Get()
+	nav := pages
+	if cfg.Shell.Enabled {
+		nav = append(append([]Page{}, pages...), shellPage)
+	}
 	d := pageData{
 		Title:  p.Title,
 		Active: p.Path,
-		Nav:    pages,
-		Cfg:    s.store.Get(),
+		Nav:    nav,
+		Cfg:    cfg,
 		Stats:  system.Collect(),
 	}
 	if r != nil {
@@ -384,6 +411,21 @@ func (s *Server) handleStatsPartial(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpls["/"].ExecuteTemplate(w, "stats", s.data(pages[0], r)); err != nil {
 		log.Printf("render stats partial: %v", err)
+	}
+}
+
+// handleTrafficAPI serves bucketed per-interface throughput as JSON for the
+// Traffic page chart. The ?range= param selects hour/day/week/month.
+func (s *Server) handleTrafficAPI(w http.ResponseWriter, r *http.Request) {
+	res, err := s.traffic.Query(r.URL.Query().Get("range"))
+	if err != nil {
+		log.Printf("traffic query: %v", err)
+		http.Error(w, "traffic query failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(res); err != nil {
+		log.Printf("traffic encode: %v", err)
 	}
 }
 
