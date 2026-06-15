@@ -173,3 +173,12 @@ main.login button { width: 100%; margin-top: 0.4rem; }
   padding: 0.4rem;
 }
 #shell-status { margin-top: 0.5rem; font-size: 0.85rem; }
+
+/* Visibility page */
+.embed {
+  width: 100%;
+  height: 75vh;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #14181d;
+}

@@ -27,8 +27,61 @@ type Config struct {
 	DHCP       DHCP        `json:"dhcp"`
 	DNS        DNS         `json:"dns"`
 	WireGuard  WireGuard   `json:"wireguard"`
+	Visibility Visibility  `json:"visibility"`
 	Shell      Shell       `json:"shell"`
 	Users      []User      `json:"users"`
+}
+
+// Visibility configures on-box network traffic analysis: ntopng with nDPI
+// deep-packet inspection on the appliance's own interfaces (plan.md §8). It is
+// the power-user deep-dive that complements the always-on Traffic page. Off by
+// default — ntopng captures and inspects packets, so a fresh box ships with no
+// extra CPU load or attack surface until the admin opts in. ntopng binds its
+// web UI to localhost only; the WebUI reverse-proxies it under /visibility
+// behind the session, so the appliance auth is the single gate.
+type Visibility struct {
+	Enabled bool `json:"enabled"` // master switch; false => no capture
+	// Interfaces lists interface Names (the wan/lan/opt logical roles) to
+	// monitor. Empty means every configured interface — the sensible default
+	// for full north-south + inter-segment visibility.
+	Interfaces []string `json:"interfaces,omitempty"`
+	HTTPPort   int      `json:"http_port,omitempty"` // localhost port ntopng's UI binds; 0 => 3000
+}
+
+// IsMonitored reports whether the named interface is captured. An empty
+// Interfaces list means every interface, so the templates can render the
+// per-interface checkboxes without special-casing the default.
+func (v Visibility) IsMonitored(name string) bool {
+	if len(v.Interfaces) == 0 {
+		return true
+	}
+	for _, n := range v.Interfaces {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Port returns the effective localhost port for ntopng's web UI (default 3000).
+func (v Visibility) Port() int {
+	if v.HTTPPort <= 0 {
+		return 3000
+	}
+	return v.HTTPPort
+}
+
+// Monitored returns the interface names ntopng should capture on: the explicit
+// list when set, otherwise every configured interface.
+func (v Visibility) Monitored(c *Config) []string {
+	if len(v.Interfaces) > 0 {
+		return v.Interfaces
+	}
+	var all []string
+	for _, ifc := range c.Interfaces {
+		all = append(all, ifc.Name)
+	}
+	return all
 }
 
 // Shell configures the web terminal (docs/shell.md). It is dark by default:
@@ -219,6 +272,9 @@ func (c *Config) Validate() error {
 	if err := c.WireGuard.validate(); err != nil {
 		return err
 	}
+	if err := c.validateVisibility(); err != nil {
+		return err
+	}
 	if err := c.validateUsers(); err != nil {
 		return err
 	}
@@ -333,6 +389,28 @@ func (wg *WireGuard) validate() error {
 				}
 			}
 		}
+	}
+	return nil
+}
+
+func (c *Config) validateVisibility() error {
+	v := c.Visibility
+	if v.HTTPPort != 0 && (v.HTTPPort < 1 || v.HTTPPort > 65535) {
+		return fmt.Errorf("visibility: http port must be 1-65535")
+	}
+	known := map[string]bool{}
+	for _, ifc := range c.Interfaces {
+		known[ifc.Name] = true
+	}
+	seen := map[string]bool{}
+	for _, name := range v.Interfaces {
+		if !known[name] {
+			return fmt.Errorf("visibility: unknown interface %q", name)
+		}
+		if seen[name] {
+			return fmt.Errorf("visibility: interface %q listed twice", name)
+		}
+		seen[name] = true
 	}
 	return nil
 }

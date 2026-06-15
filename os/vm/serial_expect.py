@@ -76,7 +76,9 @@ def main():
         send(line)
         if line == b"poweroff":
             break  # no prompt comes back; provision.sh waits for QEMU exit
-        if not expect(b"# ", 120):
+        # pkg install pulls ntopng + redis + deps over the network on first
+        # boot; give every command a generous window rather than special-casing.
+        if not expect(b"# ", 900):
             sys.exit(f"no prompt after: {line.decode()}")
 
     print("\nprovisioned")

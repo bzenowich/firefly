@@ -1,0 +1,42 @@
+{{define "content"}}
+<h1>Visibility</h1>
+<p class="muted">
+  Deep traffic analysis with ntopng and nDPI app-layer identification, on the
+  appliance's own interfaces. North-south and inter-segment traffic is seen with
+  no extra hardware; full east-west needs a managed switch or segmented ports.
+  This complements the always-on <a href="/traffic">Traffic</a> graph.
+</p>
+
+<h2>Settings</h2>
+<form method="post" action="/visibility/settings" class="row-form">
+  <label class="check">
+    <input type="checkbox" name="enabled" {{if .Cfg.Visibility.Enabled}}checked{{end}}> Enabled
+  </label>
+  <label>Web UI port (localhost)
+    <input name="http_port" size="6" value="{{with .Cfg.Visibility.HTTPPort}}{{.}}{{end}}" placeholder="3000">
+  </label>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Monitored interfaces</h2>
+<form method="post" action="/visibility/settings" class="row-form">
+  <input type="hidden" name="enabled" value="{{if .Cfg.Visibility.Enabled}}on{{end}}">
+  <input type="hidden" name="http_port" value="{{with .Cfg.Visibility.HTTPPort}}{{.}}{{end}}">
+  {{range .Cfg.Interfaces}}
+  <label class="check">
+    <input type="checkbox" name="interfaces" value="{{.Name}}"
+      {{if $.Cfg.Visibility.IsMonitored .Name}}checked{{end}}>
+    {{.Name}} <span class="muted">({{.Device}})</span>
+  </label>
+  {{end}}
+  <button type="submit">Save</button>
+</form>
+
+{{if .Cfg.Visibility.Enabled}}
+<h2>Analyzer</h2>
+<p class="muted">Changes take effect after you <a href="/system">apply</a> the configuration.</p>
+<iframe src="/visibility/app/" title="ntopng" class="embed"></iframe>
+{{else}}
+<p class="muted">Enable visibility and apply the configuration to start the analyzer.</p>
+{{end}}
+{{end}}

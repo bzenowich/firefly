@@ -15,6 +15,9 @@ if [ ! -f "$BASE" ]; then
 	unxz "$BASE.xz"
 fi
 
-# Working disk is a qcow2 overlay; reset the VM with ./reset.sh.
-[ -f fwtest.qcow2 ] || qemu-img create -f qcow2 -b "$BASE" -F qcow2 fwtest.qcow2
+# Working disk is a qcow2 overlay; reset the VM with ./reset.sh. The base
+# image is ~6 GB, too small for the appliance package set (ntopng alone pulls
+# glib/python/font deps); size the overlay to 20 GB and let FreeBSD's firstboot
+# growfs expand the ZFS pool to fill it.
+[ -f fwtest.qcow2 ] || qemu-img create -f qcow2 -b "$BASE" -F qcow2 fwtest.qcow2 20G
 echo "ok: fwtest.qcow2 ready"

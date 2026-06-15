@@ -13,6 +13,7 @@ const (
 	PFConfPath      = "/etc/pf.conf"
 	KeaConfPath     = "/usr/local/etc/kea/kea-dhcp4.conf"
 	UnboundConfPath = "/usr/local/etc/unbound/unbound.conf"
+	NtopngConfPath  = "/usr/local/etc/ntopng/ntopng.conf"
 	WGConfDir       = "/usr/local/etc/wireguard"
 )
 
@@ -41,6 +42,10 @@ func plan(cfg config.Config) ([]file, error) {
 	if err != nil {
 		return nil, err
 	}
+	ntopngConf, err := render.Ntopng(cfg)
+	if err != nil {
+		return nil, err
+	}
 	wgFiles, err := render.WireGuard(cfg)
 	if err != nil {
 		return nil, err
@@ -62,6 +67,13 @@ func plan(cfg config.Config) ([]file, error) {
 			check:  func(staged string) []string { return []string{"unbound-checkconf", staged} },
 			reload: []string{"service", "unbound", "restart"},
 		},
+		{
+			// No offline syntax checker for ntopng; the daemon validates on
+			// start. Reload restarts when enabled, stops when disabled so a
+			// turned-off feature leaves nothing capturing.
+			path: NtopngConfPath, mode: 0o644, content: ntopngConf,
+			reload: ntopngReload(cfg),
+		},
 	}
 	for _, wg := range wgFiles {
 		files = append(files, file{
@@ -71,4 +83,13 @@ func plan(cfg config.Config) ([]file, error) {
 		})
 	}
 	return files, nil
+}
+
+// ntopngReload picks the service action for a changed ntopng.conf: bring it up
+// when visibility is on, take it down when off.
+func ntopngReload(cfg config.Config) []string {
+	if cfg.Visibility.Enabled {
+		return []string{"service", "ntopng", "restart"}
+	}
+	return []string{"service", "ntopng", "stop"}
 }

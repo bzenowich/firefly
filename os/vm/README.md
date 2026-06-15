@@ -49,7 +49,11 @@ Gotchas learned the hard way (provision.sh handles both):
 ./ssh.sh 'daemon -o /root/fwd.log /root/fwd -listen 0.0.0.0:8443 -config /root/fw.json'
 ```
 
-First apply needs in the guest: `pkg install kea unbound wireguard-tools`,
-`sysrc pf_enable=YES pflog_enable=YES kea_enable=YES unbound_enable=YES
-wireguard_enable=YES`, a permissive seed `/etc/pf.conf` (`pass all`), and
-`service pf start && service pflog start`. provision.sh does all of it.
+First apply needs in the guest: `pkg install kea unbound wireguard-tools
+ntopng`, `sysrc pf_enable=YES pflog_enable=YES kea_enable=YES
+unbound_enable=YES wireguard_enable=YES ntopng_enable=YES`, a permissive seed
+`/etc/pf.conf` (`pass all`), and `service pf start && service pflog start`.
+provision.sh does all of it.
+
+The ntopng web UI is reverse-proxied by `fwd` under `/visibility/app/` (it
+binds localhost only); enable it on the Visibility page and apply.

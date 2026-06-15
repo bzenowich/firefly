@@ -44,6 +44,7 @@ var pages = []Page{
 	{Path: "/wireguard", Title: "WireGuard", tmpl: "wireguard.html"},
 	{Path: "/logs", Title: "Logs", tmpl: "logs.html"},
 	{Path: "/traffic", Title: "Traffic", tmpl: "traffic.html"},
+	{Path: "/visibility", Title: "Visibility", tmpl: "visibility.html"},
 	{Path: "/system", Title: "System", tmpl: "system.html"},
 }
 
@@ -160,6 +161,7 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStor
 	s.routesDHCP()
 	s.routesDNS()
 	s.routesWireGuard()
+	s.routesVisibility()
 	s.routesSystem()
 
 	return s, nil
