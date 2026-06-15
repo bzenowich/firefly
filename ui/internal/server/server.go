@@ -75,6 +75,18 @@ type Server struct {
 
 var funcs = template.FuncMap{
 	"humanBytes": humanBytes,
+	"contains":   contains,
+}
+
+// contains reports whether v is in the slice; used by the WireGuard template to
+// pre-check a client's granted-service boxes.
+func contains(list []string, v string) bool {
+	for _, s := range list {
+		if s == v {
+			return true
+		}
+	}
+	return false
 }
 
 func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStore *traffic.Store) (*Server, error) {
@@ -161,6 +173,7 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStor
 	s.routesDHCP()
 	s.routesDNS()
 	s.routesWireGuard()
+	s.routesWGServer()
 	s.routesVisibility()
 	s.routesSystem()
 
@@ -335,6 +348,8 @@ type pageData struct {
 
 	Logs      []logs.Entry // Logs page only
 	LogFilter logs.Filter
+
+	WGSessions map[string]string // WireGuard page: client ID -> last-seen text
 }
 
 func (s *Server) data(p Page, r *http.Request) pageData {
@@ -364,6 +379,9 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		s.totpMu.Unlock()
 	}
 	d.ApplyDeadline, d.ApplyPending = s.mgr.Pending()
+	if p.Path == "/wireguard" {
+		d.WGSessions = s.wgSessions(d.Cfg)
+	}
 	if p.Path == "/logs" && r != nil {
 		d.LogFilter = logs.Filter{
 			Source:   r.URL.Query().Get("source"),

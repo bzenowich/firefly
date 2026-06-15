@@ -161,7 +161,7 @@ Confirm distributor stock (Mouser/Arrow) before locking any SKU.
   - **NAT** — port forwards, outbound NAT, 1:1
   - **DHCP** — pools, static leases, active lease table
   - **DNS** — Unbound settings, local overrides, **Adblock** blocklist management with per-list enable + stats
-  - **WireGuard** — tunnels, peers, QR code generation for mobile clients, handshake status
+  - **WireGuard** — site-to-site tunnels + peers, **and a wan-bound remote-access ("road warrior") server**: per-client keypair generation, auto-assigned tunnel IP, QR code + downloadable config, emailed config (via SMTP relay), and last-session time from `wg show`. Each client is **default-deny** and granted explicit access to a catalog of network **services** (host+port+proto), enforced in pf on the server interface. Clients get split-tunnel configs with the appliance gateway as DNS
   - **Logs** — live firewall log (pflog tail via SSE/htmx), system log, filterable
   - **Traffic Graph** — counters sampled to SQLite, rendered with uPlot (one small JS dep); live + historical (day/week/month)
   - **Shell** — web terminal via ttyd reverse-proxied behind auth, **off by default**, big warning; SSH remains the recommended path
@@ -340,6 +340,9 @@ firewall/
   failed update) when they're *not* on the VPN? Candidates: user-configured email/SMTP,
   a self-hosted ntfy the customer points at, or a webhook to their own service. Lean:
   ship email + optional ntfy/webhook, never an us-operated cloud. Decide which for v1.
+  **Progress:** a user-configured **SMTP relay** now exists (config + `internal/mail`,
+  first consumer: emailing WireGuard client configs) — the email leg of this is built;
+  ntfy/webhook still open.
 - **AP / managed-switch bundling — lean NO (gateway-only).** Full east-west visibility
   needs owning the L2 edge (§8), which tempts bundling a switch + AP — but that rebuilds
   UniFi's ecosystem, the exact scope trap we reject (`docs/marketing.md`, "The scope

@@ -29,7 +29,35 @@ type Config struct {
 	WireGuard  WireGuard   `json:"wireguard"`
 	Visibility Visibility  `json:"visibility"`
 	Shell      Shell       `json:"shell"`
+	SMTP       SMTP        `json:"smtp"`
 	Users      []User      `json:"users"`
+}
+
+// SMTP is the relay the appliance uses to email things to admins and VPN
+// clients (e.g. WireGuard client configs). Empty Host => email disabled; the
+// UI then falls back to download/QR only. Password is stored in the config
+// document so the single-file backup carries it (plan.md §7).
+type SMTP struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"` // default 587 for starttls, 465 for tls
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+	From     string `json:"from"`               // envelope + header From address
+	Security string `json:"security,omitempty"` // starttls | tls | none; default starttls
+}
+
+// Enabled reports whether a relay is configured well enough to send.
+func (m SMTP) Enabled() bool { return m.Host != "" && m.From != "" }
+
+// EffectivePort returns the port to dial, defaulting by security mode.
+func (m SMTP) EffectivePort() int {
+	if m.Port > 0 {
+		return m.Port
+	}
+	if m.Security == "tls" {
+		return 465
+	}
+	return 587
 }
 
 // Visibility configures on-box network traffic analysis: ntopng with nDPI
@@ -194,6 +222,63 @@ type HostOverride struct {
 type WireGuard struct {
 	Enabled bool       `json:"enabled"`
 	Tunnels []WGTunnel `json:"tunnels"`
+	Server  WGServer   `json:"server"`
+}
+
+// WGServer is the remote-access ("road warrior") WireGuard server: a single
+// wan-bound interface that mobile clients dial in to. Distinct from Tunnels,
+// which are site-to-site links. Every client is default-deny and reaches only
+// the Services explicitly granted to it (WGClient.ServiceIDs); pf enforces this
+// on the server interface (render.WGServerDevice).
+type WGServer struct {
+	Enabled      bool        `json:"enabled"`
+	Address      string      `json:"address"`                 // CIDR, server's tunnel IP, e.g. 10.9.0.1/24
+	ListenPort   int         `json:"listen_port"`             // UDP; default 51820
+	EndpointHost string      `json:"endpoint_host,omitempty"` // public DNS name clients dial (NAT case)
+	PrivateKey   string      `json:"private_key"`             // base64; generated when the server is set up
+	Services     []WGService `json:"services"`
+	Clients      []WGClient  `json:"clients"`
+}
+
+// Port returns the effective UDP listen port, defaulting to 51820.
+func (s WGServer) Port() int {
+	if s.ListenPort > 0 {
+		return s.ListenPort
+	}
+	return 51820
+}
+
+// WGService is one reachable destination on the network (host IP + port). The
+// catalog is defined once; clients pick which services they may reach.
+type WGService struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	IP    string `json:"ip"`
+	Port  int    `json:"port"`
+	Proto string `json:"proto"` // tcp | udp | tcp/udp
+}
+
+// WGClient is one remote-access peer. The appliance always generates the
+// keypair (so the config can be emailed/re-sent), keyed by a stable ID since
+// the email address is the human label.
+type WGClient struct {
+	ID         string   `json:"id"`
+	Email      string   `json:"email"`
+	Address    string   `json:"address"` // tunnel IP, /32
+	PublicKey  string   `json:"public_key"`
+	PrivateKey string   `json:"private_key"` // generated here; lets us (re)send the config
+	ServiceIDs []string `json:"service_ids"` // explicit grants; default deny
+	Created    string   `json:"created"`     // RFC3339
+}
+
+// Service looks up a catalog entry by ID.
+func (s WGServer) Service(id string) (WGService, bool) {
+	for _, svc := range s.Services {
+		if svc.ID == id {
+			return svc, true
+		}
+	}
+	return WGService{}, false
 }
 
 type WGTunnel struct {
@@ -270,6 +355,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.WireGuard.validate(); err != nil {
+		return err
+	}
+	if err := c.SMTP.validate(); err != nil {
 		return err
 	}
 	if err := c.validateVisibility(); err != nil {
@@ -389,6 +477,100 @@ func (wg *WireGuard) validate() error {
 				}
 			}
 		}
+	}
+	return wg.Server.validate(ports)
+}
+
+// validate checks the remote-access server. ports carries the listen ports
+// already claimed by tunnels so the server cannot collide with them.
+func (s *WGServer) validate(ports map[int]bool) error {
+	if !s.Enabled {
+		return nil
+	}
+	if _, _, err := net.ParseCIDR(s.Address); err != nil {
+		return fmt.Errorf("wireguard server: address must be CIDR: %w", err)
+	}
+	port := s.Port()
+	if port < 1 || port > 65535 {
+		return errors.New("wireguard server: listen port must be 1-65535")
+	}
+	if ports[port] {
+		return fmt.Errorf("wireguard server: listen port %d already in use", port)
+	}
+	if !validWGKey(s.PrivateKey) {
+		return errors.New("wireguard server: invalid private key")
+	}
+	svcIDs := map[string]bool{}
+	for _, svc := range s.Services {
+		if svc.ID == "" {
+			return errors.New("wireguard service: missing id")
+		}
+		if svcIDs[svc.ID] {
+			return fmt.Errorf("wireguard service %q: duplicate id", svc.Name)
+		}
+		svcIDs[svc.ID] = true
+		if svc.Name == "" {
+			return errors.New("wireguard service: name is required")
+		}
+		if net.ParseIP(svc.IP) == nil {
+			return fmt.Errorf("wireguard service %q: invalid ip %q", svc.Name, svc.IP)
+		}
+		if svc.Port < 1 || svc.Port > 65535 {
+			return fmt.Errorf("wireguard service %q: port must be 1-65535", svc.Name)
+		}
+		switch svc.Proto {
+		case "tcp", "udp", "tcp/udp":
+		default:
+			return fmt.Errorf("wireguard service %q: proto must be tcp, udp, or tcp/udp", svc.Name)
+		}
+	}
+	ids := map[string]bool{}
+	for _, cl := range s.Clients {
+		if cl.ID == "" {
+			return errors.New("wireguard client: missing id")
+		}
+		if ids[cl.ID] {
+			return fmt.Errorf("wireguard client %q: duplicate id", cl.Email)
+		}
+		ids[cl.ID] = true
+		if !strings.Contains(cl.Email, "@") {
+			return fmt.Errorf("wireguard client %q: a valid email is required", cl.Email)
+		}
+		if _, _, err := net.ParseCIDR(cl.Address); err != nil {
+			return fmt.Errorf("wireguard client %q: address must be CIDR: %w", cl.Email, err)
+		}
+		if !validWGKey(cl.PublicKey) {
+			return fmt.Errorf("wireguard client %q: invalid public key", cl.Email)
+		}
+		if cl.PrivateKey != "" && !validWGKey(cl.PrivateKey) {
+			return fmt.Errorf("wireguard client %q: invalid private key", cl.Email)
+		}
+		for _, id := range cl.ServiceIDs {
+			if !svcIDs[id] {
+				return fmt.Errorf("wireguard client %q: unknown service %q", cl.Email, id)
+			}
+		}
+	}
+	return nil
+}
+
+func (m *SMTP) validate() error {
+	if m.Host == "" {
+		return nil // relay not configured; email disabled
+	}
+	if m.From == "" {
+		return errors.New("smtp: from address is required when a host is set")
+	}
+	if !strings.Contains(m.From, "@") {
+		return fmt.Errorf("smtp: from %q is not an email address", m.From)
+	}
+	if m.Port != 0 && (m.Port < 1 || m.Port > 65535) {
+		return errors.New("smtp: port must be 1-65535")
+	}
+	switch m.Security {
+	case "", "starttls", "tls", "none":
+	default:
+		return fmt.Errorf("smtp: security must be starttls, tls, or none")
 	}
 	return nil
 }

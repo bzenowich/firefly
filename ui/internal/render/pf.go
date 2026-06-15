@@ -98,7 +98,38 @@ func PF(cfg config.Config) (string, error) {
 		w("")
 	}
 
+	wgServerRules(&b, cfg, wan)
+
 	return b.String(), nil
+}
+
+// wgServerRules emits the remote-access server's pf rules: open its UDP listen
+// port on the wan, then default-deny on the VPN interface with one explicit
+// pass per client/service grant. Default deny means a client with no grants
+// reaches nothing on the network.
+func wgServerRules(b *strings.Builder, cfg config.Config, wan config.Interface) {
+	s := cfg.WireGuard.Server
+	if !cfg.WireGuard.Enabled || !s.Enabled {
+		return
+	}
+	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+
+	w("# WireGuard remote-access server")
+	w("pass in on $%s inet proto udp from any to ($%s) port %d keep state", macro(wan), macro(wan), s.Port())
+	// Default deny on the VPN interface; every grant below is an explicit allow.
+	w("block in on %s all", WGServerDevice)
+	for _, c := range s.Clients {
+		clientIP := strings.SplitN(c.Address, "/", 2)[0]
+		for _, id := range c.ServiceIDs {
+			svc, ok := s.Service(id)
+			if !ok {
+				continue
+			}
+			w("pass in on %s inet proto %s from %s to %s port %d keep state # %s -> %s",
+				WGServerDevice, proto(svc.Proto), clientIP, svc.IP, svc.Port, c.Email, svc.Name)
+		}
+	}
+	w("")
 }
 
 func byRole(cfg config.Config, role string) (config.Interface, bool) {
