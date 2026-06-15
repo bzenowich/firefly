@@ -46,7 +46,12 @@
   // draw renders one interface's series onto a canvas: rx and tx as filled
   // lines, a peak gridline, and a few time ticks. Pure 2D canvas — no chart
   // library, so the appliance stays a single offline binary.
-  function draw(canvas, series, step) {
+  //
+  // The x-axis domain is the requested window [now-span, now], not the span of
+  // the data that happens to exist. That way week/month genuinely zoom out
+  // (sparse data sits at the right edge) and the tick labels switch to dates,
+  // instead of stretching whatever samples we have across the full width.
+  function draw(canvas, series, step, span) {
     var dpr = window.devicePixelRatio || 1;
     var W = canvas.clientWidth, H = canvas.clientHeight;
     canvas.width = W * dpr; canvas.height = H * dpr;
@@ -58,8 +63,9 @@
     var pts = series.points || [];
     var peak = 1;
     for (var i = 0; i < pts.length; i++) peak = Math.max(peak, pts[i].rx, pts[i].tx);
-    var span = pts.length ? (pts[pts.length - 1].t - pts[0].t) || step : step;
-    var t0 = pts.length ? pts[0].t : 0;
+    span = span || step;
+    var tEnd = Math.floor(Date.now() / 1000);
+    var t0 = tEnd - span; // window start anchors the left edge
 
     var x = function (t) { return padL + (span ? (t - t0) / span : 0) * (W - padL - padR); };
     var y = function (v) { return padT + (1 - v / peak) * (H - padT - padB); };
@@ -74,13 +80,11 @@
       ctx.fillText(fmtRate(peak * f), padL - 6, yy);
     });
 
-    // x time ticks
+    // x time ticks across the full window domain
     ctx.textAlign = "center"; ctx.textBaseline = "top";
-    if (pts.length) {
-      for (var k = 0; k <= 4; k++) {
-        var tt = t0 + (span * k / 4);
-        ctx.fillText(fmtTime(tt, span), x(tt), H - padB + 4);
-      }
+    for (var k = 0; k <= 4; k++) {
+      var tt = t0 + (span * k / 4);
+      ctx.fillText(fmtTime(tt, span), x(tt), H - padB + 4);
     }
 
     if (pts.length < 2) {
@@ -125,7 +129,7 @@
           '<canvas></canvas>';
         box.appendChild(card);
       }
-      draw(card.querySelector("canvas"), s, data.step);
+      draw(card.querySelector("canvas"), s, data.step, data.span);
     });
     // drop charts for interfaces no longer present
     Array.prototype.forEach.call(box.children, function (c) {

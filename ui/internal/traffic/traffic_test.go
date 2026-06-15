@@ -37,8 +37,8 @@ func TestQueryBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Range != "hour" || res.Step != 60 {
-		t.Fatalf("range=%q step=%d", res.Range, res.Step)
+	if res.Range != "hour" || res.Step != 60 || res.Span != 3600 {
+		t.Fatalf("range=%q step=%d span=%d", res.Range, res.Step, res.Span)
 	}
 	if len(res.Series) != 1 || res.Series[0].Iface != "eth0" {
 		t.Fatalf("series = %+v", res.Series)

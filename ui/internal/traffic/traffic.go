@@ -98,6 +98,7 @@ type Series struct {
 type Result struct {
 	Range  string   `json:"range"`
 	Step   int      `json:"step"` // bucket width, seconds
+	Span   int      `json:"span"` // lookback window, seconds — the x-axis domain
 	Series []Series `json:"series"`
 }
 
@@ -129,7 +130,7 @@ func (s *Store) Query(rangeName string) (Result, error) {
 	}
 	defer rows.Close()
 
-	res := Result{Range: rangeName, Step: w.bucket}
+	res := Result{Range: rangeName, Step: w.bucket, Span: w.span}
 	idx := map[string]int{} // iface -> res.Series index
 	for rows.Next() {
 		var iface string
