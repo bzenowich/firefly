@@ -47,13 +47,25 @@ nav {
 }
 
 nav a {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   color: var(--text);
   text-decoration: none;
   padding: 0.45rem 1.2rem;
 }
 
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
 nav a:hover { background: var(--panel); }
+nav a:hover .nav-icon { opacity: 1; }
 nav a.active { background: var(--panel); border-left: 3px solid var(--accent); padding-left: calc(1.2rem - 3px); }
+nav a.active .nav-icon { opacity: 1; color: var(--accent); }
 
 main { flex: 1; padding: 1.2rem 1.6rem; max-width: 70rem; }
 
