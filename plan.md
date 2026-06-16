@@ -158,14 +158,15 @@ Confirm distributor stock (Mouser/Arrow) before locking any SKU.
   (prevents lock-out — the classic remote-firewall footgun).
 - **Pages (matching current feature list):**
   - **Dashboard** — WAN status/IP, per-interface throughput sparklines, CPU/RAM/temp, service health, BE/version info
-  - **NAT** — port forwards, outbound NAT, 1:1
+  - **Services** — shared catalog of network destinations (name + host IP + port + proto), defined once and referenced by both NAT port forwards and WireGuard access grants, so a host's address lives in one place. Deleting a service is refused while a port forward references it
+  - **NAT** — port forwards (each references a **service** for its destination), outbound NAT, 1:1
   - **DHCP** — pools, static leases, active lease table
   - **DNS** — Unbound settings, local overrides, **Adblock** blocklist management with per-list enable + stats
-  - **WireGuard** — site-to-site tunnels + peers, **and a wan-bound remote-access ("road warrior") server**: per-client keypair generation, auto-assigned tunnel IP, QR code + downloadable config, emailed config (via SMTP relay), and last-session time from `wg show`. Each client is **default-deny** and granted explicit access to a catalog of network **services** (host+port+proto), enforced in pf on the server interface. Clients get split-tunnel configs with the appliance gateway as DNS
+  - **WireGuard** — site-to-site tunnels + peers, **and a wan-bound remote-access ("road warrior") server**: per-client keypair generation, auto-assigned tunnel IP, QR code + downloadable config, emailed config (via the System-page SMTP relay), and last-session time from `wg show`. Each client is **default-deny** and granted explicit access to **services** from the shared catalog via a searchable per-client access page (scales to ~100 services); grants are enforced in pf on the server interface. Clients get split-tunnel configs with the appliance gateway as DNS
   - **Logs** — live firewall log (pflog tail via SSE/htmx), system log, filterable
   - **Traffic Graph** — counters sampled to SQLite, rendered with uPlot (one small JS dep); live + historical (day/week/month)
   - **Shell** — web terminal via ttyd reverse-proxied behind auth, **off by default**, big warning; SSH remains the recommended path
-  - **System** — updates (BE-based), config backup/restore (single file!), users, certificates, reboot/halt
+  - **System** — updates (BE-based), config backup/restore (single file!), users, certificates, **outbound SMTP relay** (shared email facility: WireGuard client configs today, status/alerts later), reboot/halt
 - **Auth:** local users, bcrypt/argon2, session cookies, optional TOTP, login
   rate-limiting. **Passkeys/WebAuthn** for biometric phone login (no password) —
   on-brand and best-in-class mobile UX; TOTP is the fallback.

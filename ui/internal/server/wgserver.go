@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
@@ -20,15 +21,45 @@ import (
 
 func (s *Server) routesWGServer() {
 	s.mux.HandleFunc("POST /wireguard/server", s.handleWGServerSettings)
-	s.mux.HandleFunc("POST /wireguard/server/services", s.handleWGServiceCreate)
-	s.mux.HandleFunc("POST /wireguard/server/services/{id}/delete", s.handleWGServiceDelete)
 	s.mux.HandleFunc("POST /wireguard/server/clients", s.handleWGClientCreate)
 	s.mux.HandleFunc("POST /wireguard/server/clients/{id}", s.handleWGClientUpdate)
 	s.mux.HandleFunc("POST /wireguard/server/clients/{id}/delete", s.handleWGClientDelete)
 	s.mux.HandleFunc("POST /wireguard/server/clients/{id}/email", s.handleWGClientEmail)
 	s.mux.HandleFunc("GET /wireguard/server/clients/{id}/config", s.handleWGClientConfig)
 	s.mux.HandleFunc("GET /wireguard/server/clients/{id}/qr.png", s.handleWGClientQR)
-	s.mux.HandleFunc("POST /wireguard/smtp", s.handleSMTPSettings)
+	s.mux.HandleFunc("GET /wireguard/server/clients/{id}/access", s.handleWGClientAccess)
+}
+
+// wgAccessKey is the template-map key for the per-client access editor sub-page.
+const wgAccessKey = "wg-access"
+
+// wgAccessData drives the access editor: the shared page data plus the client
+// being edited. Services come from the embedded pageData's Cfg.
+type wgAccessData struct {
+	pageData
+	Client config.WGClient
+}
+
+// handleWGClientAccess renders the searchable per-client service access editor.
+// The Save button posts back to handleWGClientUpdate, which replaces the grant
+// set, so no new write path is needed here.
+func (s *Server) handleWGClientAccess(w http.ResponseWriter, r *http.Request) {
+	cl, ok := findClient(s.store.Get(), r.PathValue("id"))
+	if !ok {
+		http.Error(w, "client not found", http.StatusNotFound)
+		return
+	}
+	var wgPage Page
+	for _, p := range pages {
+		if p.Path == "/wireguard" {
+			wgPage = p
+		}
+	}
+	d := wgAccessData{pageData: s.data(wgPage, r), Client: cl}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.tmpls[wgAccessKey].Execute(w, d); err != nil {
+		log.Printf("render wg access: %v", err)
+	}
 }
 
 // handleWGServerSettings toggles the server and edits its address/port/endpoint.
@@ -64,45 +95,6 @@ func (s *Server) handleWGServerSettings(w http.ResponseWriter, r *http.Request) 
 			srv.PrivateKey = priv
 		}
 		return nil
-	})
-	redirect(w, r, "/wireguard", err)
-}
-
-func (s *Server) handleWGServiceCreate(w http.ResponseWriter, r *http.Request) {
-	port, err := strconv.Atoi(strings.TrimSpace(r.FormValue("port")))
-	if err != nil {
-		redirect(w, r, "/wireguard", errors.New("service port must be a number"))
-		return
-	}
-	svc := config.WGService{
-		ID:    config.NewID(),
-		Name:  strings.TrimSpace(r.FormValue("name")),
-		IP:    strings.TrimSpace(r.FormValue("ip")),
-		Port:  port,
-		Proto: r.FormValue("proto"),
-	}
-	err = s.store.Update(func(c *config.Config) error {
-		c.WireGuard.Server.Services = append(c.WireGuard.Server.Services, svc)
-		return nil
-	})
-	redirect(w, r, "/wireguard", err)
-}
-
-func (s *Server) handleWGServiceDelete(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	err := s.store.Update(func(c *config.Config) error {
-		srv := &c.WireGuard.Server
-		for i, svc := range srv.Services {
-			if svc.ID == id {
-				srv.Services = append(srv.Services[:i], srv.Services[i+1:]...)
-				// Drop the now-dangling grant from every client.
-				for j := range srv.Clients {
-					srv.Clients[j].ServiceIDs = without(srv.Clients[j].ServiceIDs, id)
-				}
-				return nil
-			}
-		}
-		return errors.New("service not found")
 	})
 	redirect(w, r, "/wireguard", err)
 }
@@ -146,8 +138,14 @@ func (s *Server) handleWGClientCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWGClientUpdate(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		redirect(w, r, "/wireguard", err)
+		return
+	}
 	id := r.PathValue("id")
 	err := s.store.Update(updateClient(id, func(cl *config.WGClient) {
+		// r.Form["service_ids"] is the set of ticked boxes; empty (all
+		// unchecked) clears access, which is the intended default-deny reset.
 		cl.ServiceIDs = r.Form["service_ids"]
 	}))
 	redirect(w, r, "/wireguard", err)
@@ -218,29 +216,6 @@ func (s *Server) handleWGClientQR(w http.ResponseWriter, r *http.Request) {
 	w.Write(png)
 }
 
-func (s *Server) handleSMTPSettings(w http.ResponseWriter, r *http.Request) {
-	port := 0
-	if v := strings.TrimSpace(r.FormValue("port")); v != "" {
-		var err error
-		if port, err = strconv.Atoi(v); err != nil {
-			redirect(w, r, "/wireguard", errors.New("smtp port must be a number"))
-			return
-		}
-	}
-	err := s.store.Update(func(c *config.Config) error {
-		c.SMTP = config.SMTP{
-			Host:     strings.TrimSpace(r.FormValue("host")),
-			Port:     port,
-			Username: strings.TrimSpace(r.FormValue("username")),
-			Password: r.FormValue("password"),
-			From:     strings.TrimSpace(r.FormValue("from")),
-			Security: r.FormValue("security"),
-		}
-		return nil
-	})
-	redirect(w, r, "/wireguard", err)
-}
-
 // serverClientConfig renders one remote-access client's config by id.
 func (s *Server) serverClientConfig(id string) (string, config.WGClient, error) {
 	cfg := s.store.Get()
@@ -291,17 +266,6 @@ func clientFile(cl config.WGClient) string {
 		safe = "client"
 	}
 	return "vpn-" + safe + ".conf"
-}
-
-// without returns ids with v removed.
-func without(ids []string, v string) []string {
-	out := ids[:0]
-	for _, id := range ids {
-		if id != v {
-			out = append(out, id)
-		}
-	}
-	return out
 }
 
 // nextClientAddr picks the lowest free host address in the server subnet,

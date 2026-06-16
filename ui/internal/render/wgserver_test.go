@@ -12,6 +12,10 @@ import (
 func serverConfig(t *testing.T) config.Config {
 	t.Helper()
 	cfg := config.Default()
+	cfg.Services = []config.Service{
+		{ID: "s1", Name: "NAS", IP: "192.168.1.10", Port: 443, Proto: "tcp"},
+		{ID: "s2", Name: "DNS", IP: "192.168.1.1", Port: 53, Proto: "tcp/udp"},
+	}
 	cfg.WireGuard = config.WireGuard{
 		Enabled: true,
 		Server: config.WGServer{
@@ -20,10 +24,6 @@ func serverConfig(t *testing.T) config.Config {
 			ListenPort:   51820,
 			EndpointHost: "vpn.example.com",
 			PrivateKey:   testKey(9),
-			Services: []config.WGService{
-				{ID: "s1", Name: "NAS", IP: "192.168.1.10", Port: 443, Proto: "tcp"},
-				{ID: "s2", Name: "DNS", IP: "192.168.1.1", Port: 53, Proto: "tcp/udp"},
-			},
 			Clients: []config.WGClient{
 				{ID: "c1", Email: "a@example.com", Address: "10.9.0.2/32",
 					PublicKey: testKey(10), PrivateKey: testKey(11), ServiceIDs: []string{"s1"}},

@@ -267,11 +267,24 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 }
 
+// makeService creates one service via the Services page and returns its ID, so
+// NAT and WireGuard tests have a catalog entry to reference.
+func makeService(t *testing.T, c *client, store *config.Store) string {
+	t.Helper()
+	if loc := c.post(t, "/services", url.Values{
+		"name": {"web"}, "ip": {"192.168.1.10"}, "port": {"443"}, "proto": {"tcp"},
+	}); loc.Query().Get("err") != "" {
+		t.Fatalf("service create: %s", loc.Query().Get("err"))
+	}
+	svcs := store.Get().Services
+	return svcs[len(svcs)-1].ID
+}
+
 func TestForwardCRUD(t *testing.T) {
 	c, store := newTestServer(t)
+	svcID := makeService(t, c, store)
 	form := url.Values{
-		"name": {"web"}, "proto": {"tcp"}, "wan_port": {"443"},
-		"dest_ip": {"192.168.1.10"}, "dest_port": {"443"}, "enabled": {"on"},
+		"name": {"web"}, "service_id": {svcID}, "wan_port": {"443"}, "enabled": {"on"},
 	}
 
 	// Create.
@@ -279,7 +292,7 @@ func TestForwardCRUD(t *testing.T) {
 		t.Fatalf("create failed: %s", loc.Query().Get("err"))
 	}
 	fwds := store.Get().NAT.PortForwards
-	if len(fwds) != 1 || fwds[0].Name != "web" || !fwds[0].Enabled {
+	if len(fwds) != 1 || fwds[0].Name != "web" || fwds[0].ServiceID != svcID || !fwds[0].Enabled {
 		t.Fatalf("create: %+v", fwds)
 	}
 	id := fwds[0].ID
@@ -300,10 +313,7 @@ func TestForwardCRUD(t *testing.T) {
 	}
 
 	// Invalid create surfaces as flash error, config unchanged.
-	bad := url.Values{
-		"name": {"bad"}, "proto": {"tcp"}, "wan_port": {"99999"},
-		"dest_ip": {"192.168.1.11"}, "dest_port": {"80"},
-	}
+	bad := url.Values{"name": {"bad"}, "service_id": {svcID}, "wan_port": {"99999"}}
 	if loc := c.post(t, "/nat/forwards", bad); loc.Query().Get("err") == "" {
 		t.Fatal("want flash error for invalid wan port")
 	}
@@ -325,9 +335,9 @@ func TestForwardCRUD(t *testing.T) {
 
 func TestPFPreview(t *testing.T) {
 	c, store := newTestServer(t)
+	svcID := makeService(t, c, store)
 	c.post(t, "/nat/forwards", url.Values{
-		"name": {"web"}, "proto": {"tcp"}, "wan_port": {"443"},
-		"dest_ip": {"192.168.1.10"}, "dest_port": {"443"}, "enabled": {"on"},
+		"name": {"web"}, "service_id": {svcID}, "wan_port": {"443"}, "enabled": {"on"},
 	})
 	if len(store.Get().NAT.PortForwards) != 1 {
 		t.Fatal("setup: forward not created")

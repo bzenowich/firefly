@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -25,6 +26,33 @@ func (s *Server) routesSystem() {
 	s.mux.HandleFunc("POST /system/totp/confirm", s.handleTOTPConfirm)
 	s.mux.HandleFunc("POST /system/totp/disable", s.handleTOTPDisable)
 	s.mux.HandleFunc("POST /system/shell", s.handleShellToggle)
+	s.mux.HandleFunc("POST /system/smtp", s.handleSMTPSettings)
+}
+
+// handleSMTPSettings saves the outbound mail relay. It lives on the System page
+// because email is a shared facility: WireGuard client configs today, status
+// and alert notifications later.
+func (s *Server) handleSMTPSettings(w http.ResponseWriter, r *http.Request) {
+	port := 0
+	if v := strings.TrimSpace(r.FormValue("port")); v != "" {
+		var err error
+		if port, err = strconv.Atoi(v); err != nil {
+			redirect(w, r, "/system", errors.New("smtp port must be a number"))
+			return
+		}
+	}
+	err := s.store.Update(func(c *config.Config) error {
+		c.SMTP = config.SMTP{
+			Host:     strings.TrimSpace(r.FormValue("host")),
+			Port:     port,
+			Username: strings.TrimSpace(r.FormValue("username")),
+			Password: r.FormValue("password"),
+			From:     strings.TrimSpace(r.FormValue("from")),
+			Security: r.FormValue("security"),
+		}
+		return nil
+	})
+	redirect(w, r, "/system", err)
 }
 
 // handleShellToggle flips the web-shell master switch. It is a UI-service

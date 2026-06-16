@@ -6,10 +6,49 @@ import (
 	"testing"
 )
 
+func validService() Service {
+	return Service{ID: "svc-web", Name: "web", IP: "192.168.1.10", Port: 443, Proto: "tcp"}
+}
+
 func validForward() PortForward {
-	return PortForward{
-		ID: NewID(), Name: "web", Proto: "tcp",
-		WANPort: 443, DestIP: "192.168.1.10", DestPort: 443, Enabled: true,
+	return PortForward{ID: NewID(), Name: "web", ServiceID: "svc-web", WANPort: 443, Enabled: true}
+}
+
+// withForward returns a Default config carrying the web service and pf.
+func withForward(pf PortForward) Config {
+	cfg := Default()
+	cfg.Services = []Service{validService()}
+	cfg.NAT.PortForwards = []PortForward{pf}
+	return cfg
+}
+
+func TestValidateServices(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Service)
+		wantErr string
+	}{
+		{"valid", func(s *Service) {}, ""},
+		{"missing id", func(s *Service) { s.ID = "" }, "missing id"},
+		{"missing name", func(s *Service) { s.Name = "" }, "name is required"},
+		{"bad proto", func(s *Service) { s.Proto = "icmp" }, "proto must be"},
+		{"port zero", func(s *Service) { s.Port = 0 }, "port must be"},
+		{"bad ip", func(s *Service) { s.IP = "not-an-ip" }, "invalid ip"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			svc := validService()
+			tc.mutate(&svc)
+			cfg.Services = []Service{svc}
+			err := cfg.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 
@@ -22,18 +61,15 @@ func TestValidatePortForwards(t *testing.T) {
 		{"valid", func(pf *PortForward) {}, ""},
 		{"missing id", func(pf *PortForward) { pf.ID = "" }, "missing id"},
 		{"missing name", func(pf *PortForward) { pf.Name = "" }, "name is required"},
-		{"bad proto", func(pf *PortForward) { pf.Proto = "icmp" }, "proto must be"},
+		{"unknown service", func(pf *PortForward) { pf.ServiceID = "nope" }, "unknown service"},
 		{"wan port zero", func(pf *PortForward) { pf.WANPort = 0 }, "wan port must be"},
 		{"wan port too big", func(pf *PortForward) { pf.WANPort = 70000 }, "wan port must be"},
-		{"dest port zero", func(pf *PortForward) { pf.DestPort = 0 }, "destination port must be"},
-		{"bad dest ip", func(pf *PortForward) { pf.DestIP = "not-an-ip" }, "invalid destination ip"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Default()
 			pf := validForward()
 			tc.mutate(&pf)
-			cfg.NAT.PortForwards = []PortForward{pf}
+			cfg := withForward(pf)
 			err := cfg.Validate()
 			switch {
 			case tc.wantErr == "" && err != nil:
@@ -47,12 +83,16 @@ func TestValidatePortForwards(t *testing.T) {
 
 func TestValidateDuplicateWANPort(t *testing.T) {
 	cfg := Default()
+	cfg.Services = []Service{
+		validService(),
+		{ID: "svc-udp", Name: "game", IP: "192.168.1.20", Port: 443, Proto: "udp"},
+	}
 	a, b := validForward(), validForward()
 	cfg.NAT.PortForwards = []PortForward{a, b}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "already forwarded") {
 		t.Fatalf("want duplicate wan port error, got %v", err)
 	}
-	b.Proto = "udp" // same port, different proto is fine
+	b.ServiceID = "svc-udp" // same wan port, different proto is fine
 	cfg.NAT.PortForwards = []PortForward{a, b}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -108,6 +148,7 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	pf := validForward()
 	err = s.Update(func(c *Config) error {
+		c.Services = append(c.Services, validService())
 		c.NAT.PortForwards = append(c.NAT.PortForwards, pf)
 		return nil
 	})

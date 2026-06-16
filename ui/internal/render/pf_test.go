@@ -41,10 +41,15 @@ func TestPFDefault(t *testing.T) {
 func TestPFFull(t *testing.T) {
 	cfg := config.Default()
 	cfg.Interfaces[2].IPv4 = "10.0.2.1/24" // OPT1 configured
+	cfg.Services = []config.Service{
+		{ID: "svc-web", Name: "web", IP: "192.168.1.10", Port: 443, Proto: "tcp"},
+		{ID: "svc-game", Name: "game", IP: "192.168.1.20", Port: 27015, Proto: "tcp/udp"},
+		{ID: "svc-old", Name: "old", IP: "192.168.1.30", Port: 80, Proto: "tcp"},
+	}
 	cfg.NAT.PortForwards = []config.PortForward{
-		{ID: "a1", Name: "web", Proto: "tcp", WANPort: 443, DestIP: "192.168.1.10", DestPort: 443, Enabled: true},
-		{ID: "b2", Name: "game", Proto: "tcp/udp", WANPort: 27015, DestIP: "192.168.1.20", DestPort: 27015, Enabled: true},
-		{ID: "c3", Name: "old", Proto: "tcp", WANPort: 8080, DestIP: "192.168.1.30", DestPort: 80, Enabled: false},
+		{ID: "a1", Name: "web", ServiceID: "svc-web", WANPort: 443, Enabled: true},
+		{ID: "b2", Name: "game", ServiceID: "svc-game", WANPort: 27015, Enabled: true},
+		{ID: "c3", Name: "old", ServiceID: "svc-old", WANPort: 8080, Enabled: false},
 	}
 	cfg.WireGuard = config.WireGuard{
 		Enabled: true,

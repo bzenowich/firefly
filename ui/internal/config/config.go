@@ -23,6 +23,7 @@ type Config struct {
 	Version    int         `json:"version"`
 	System     System      `json:"system"`
 	Interfaces []Interface `json:"interfaces"`
+	Services   []Service   `json:"services"`
 	NAT        NAT         `json:"nat"`
 	DHCP       DHCP        `json:"dhcp"`
 	DNS        DNS         `json:"dns"`
@@ -174,19 +175,41 @@ type Interface struct {
 	DHCPClient bool   `json:"dhcp_client,omitempty"`
 }
 
+// Service is one reachable destination on the network (host IP + port + proto).
+// The catalog is defined once on the Services page and referenced from both NAT
+// port forwards and WireGuard remote-access access grants, so a host's address
+// lives in exactly one place.
+type Service struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	IP    string `json:"ip"`
+	Port  int    `json:"port"`
+	Proto string `json:"proto"` // tcp | udp | tcp/udp
+}
+
+// Service looks up a catalog entry by ID.
+func (c *Config) Service(id string) (Service, bool) {
+	for _, svc := range c.Services {
+		if svc.ID == id {
+			return svc, true
+		}
+	}
+	return Service{}, false
+}
+
 type NAT struct {
 	OutboundMode string        `json:"outbound_mode"` // automatic | manual
 	PortForwards []PortForward `json:"port_forwards"`
 }
 
+// PortForward exposes one Service to the WAN on WANPort. The destination
+// address, port, and protocol come from the referenced Service.
 type PortForward struct {
-	ID       string `json:"id"` // stable handle for edit/delete; survives reordering
-	Name     string `json:"name"`
-	Proto    string `json:"proto"` // tcp | udp | tcp/udp
-	WANPort  int    `json:"wan_port"`
-	DestIP   string `json:"dest_ip"`
-	DestPort int    `json:"dest_port"`
-	Enabled  bool   `json:"enabled"`
+	ID        string `json:"id"` // stable handle for edit/delete; survives reordering
+	Name      string `json:"name"`
+	ServiceID string `json:"service_id"`
+	WANPort   int    `json:"wan_port"`
+	Enabled   bool   `json:"enabled"`
 }
 
 type DHCP struct {
@@ -231,13 +254,12 @@ type WireGuard struct {
 // the Services explicitly granted to it (WGClient.ServiceIDs); pf enforces this
 // on the server interface (render.WGServerDevice).
 type WGServer struct {
-	Enabled      bool        `json:"enabled"`
-	Address      string      `json:"address"`                 // CIDR, server's tunnel IP, e.g. 10.9.0.1/24
-	ListenPort   int         `json:"listen_port"`             // UDP; default 51820
-	EndpointHost string      `json:"endpoint_host,omitempty"` // public DNS name clients dial (NAT case)
-	PrivateKey   string      `json:"private_key"`             // base64; generated when the server is set up
-	Services     []WGService `json:"services"`
-	Clients      []WGClient  `json:"clients"`
+	Enabled      bool       `json:"enabled"`
+	Address      string     `json:"address"`                 // CIDR, server's tunnel IP, e.g. 10.9.0.1/24
+	ListenPort   int        `json:"listen_port"`             // UDP; default 51820
+	EndpointHost string     `json:"endpoint_host,omitempty"` // public DNS name clients dial (NAT case)
+	PrivateKey   string     `json:"private_key"`             // base64; generated when the server is set up
+	Clients      []WGClient `json:"clients"`
 }
 
 // Port returns the effective UDP listen port, defaulting to 51820.
@@ -246,16 +268,6 @@ func (s WGServer) Port() int {
 		return s.ListenPort
 	}
 	return 51820
-}
-
-// WGService is one reachable destination on the network (host IP + port). The
-// catalog is defined once; clients pick which services they may reach.
-type WGService struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	IP    string `json:"ip"`
-	Port  int    `json:"port"`
-	Proto string `json:"proto"` // tcp | udp | tcp/udp
 }
 
 // WGClient is one remote-access peer. The appliance always generates the
@@ -269,16 +281,6 @@ type WGClient struct {
 	PrivateKey string   `json:"private_key"` // generated here; lets us (re)send the config
 	ServiceIDs []string `json:"service_ids"` // explicit grants; default deny
 	Created    string   `json:"created"`     // RFC3339
-}
-
-// Service looks up a catalog entry by ID.
-func (s WGServer) Service(id string) (WGService, bool) {
-	for _, svc := range s.Services {
-		if svc.ID == id {
-			return svc, true
-		}
-	}
-	return WGService{}, false
 }
 
 type WGTunnel struct {
@@ -345,7 +347,11 @@ func (c *Config) Validate() error {
 	if err := c.validateInterfaces(); err != nil {
 		return err
 	}
-	if err := c.NAT.validate(); err != nil {
+	svc, err := c.validateServices()
+	if err != nil {
+		return err
+	}
+	if err := c.NAT.validate(svc); err != nil {
 		return err
 	}
 	if err := c.validateDHCP(); err != nil {
@@ -354,7 +360,7 @@ func (c *Config) Validate() error {
 	if err := c.DNS.validate(); err != nil {
 		return err
 	}
-	if err := c.WireGuard.validate(); err != nil {
+	if err := c.WireGuard.validate(svc); err != nil {
 		return err
 	}
 	if err := c.SMTP.validate(); err != nil {
@@ -425,7 +431,7 @@ func (d *DNS) validate() error {
 	return nil
 }
 
-func (wg *WireGuard) validate() error {
+func (wg *WireGuard) validate(services map[string]Service) error {
 	if !wg.Enabled {
 		return nil
 	}
@@ -478,12 +484,13 @@ func (wg *WireGuard) validate() error {
 			}
 		}
 	}
-	return wg.Server.validate(ports)
+	return wg.Server.validate(ports, services)
 }
 
 // validate checks the remote-access server. ports carries the listen ports
-// already claimed by tunnels so the server cannot collide with them.
-func (s *WGServer) validate(ports map[int]bool) error {
+// already claimed by tunnels so the server cannot collide with them; services
+// is the shared catalog clients grant access into.
+func (s *WGServer) validate(ports map[int]bool, services map[string]Service) error {
 	if !s.Enabled {
 		return nil
 	}
@@ -499,30 +506,6 @@ func (s *WGServer) validate(ports map[int]bool) error {
 	}
 	if !validWGKey(s.PrivateKey) {
 		return errors.New("wireguard server: invalid private key")
-	}
-	svcIDs := map[string]bool{}
-	for _, svc := range s.Services {
-		if svc.ID == "" {
-			return errors.New("wireguard service: missing id")
-		}
-		if svcIDs[svc.ID] {
-			return fmt.Errorf("wireguard service %q: duplicate id", svc.Name)
-		}
-		svcIDs[svc.ID] = true
-		if svc.Name == "" {
-			return errors.New("wireguard service: name is required")
-		}
-		if net.ParseIP(svc.IP) == nil {
-			return fmt.Errorf("wireguard service %q: invalid ip %q", svc.Name, svc.IP)
-		}
-		if svc.Port < 1 || svc.Port > 65535 {
-			return fmt.Errorf("wireguard service %q: port must be 1-65535", svc.Name)
-		}
-		switch svc.Proto {
-		case "tcp", "udp", "tcp/udp":
-		default:
-			return fmt.Errorf("wireguard service %q: proto must be tcp, udp, or tcp/udp", svc.Name)
-		}
 	}
 	ids := map[string]bool{}
 	for _, cl := range s.Clients {
@@ -546,7 +529,7 @@ func (s *WGServer) validate(ports map[int]bool) error {
 			return fmt.Errorf("wireguard client %q: invalid private key", cl.Email)
 		}
 		for _, id := range cl.ServiceIDs {
-			if !svcIDs[id] {
+			if _, ok := services[id]; !ok {
 				return fmt.Errorf("wireguard client %q: unknown service %q", cl.Email, id)
 			}
 		}
@@ -668,7 +651,38 @@ func (c *Config) validateDHCP() error {
 	return nil
 }
 
-func (n *NAT) validate() error {
+// validateServices checks the shared catalog and returns it as an id->Service
+// map, which NAT and WireGuard validation use to resolve their references.
+func (c *Config) validateServices() (map[string]Service, error) {
+	byID := map[string]Service{}
+	for _, svc := range c.Services {
+		where := fmt.Sprintf("service %q", svc.Name)
+		if svc.ID == "" {
+			return nil, errors.New("service: missing id")
+		}
+		if _, dup := byID[svc.ID]; dup {
+			return nil, fmt.Errorf("%s: duplicate id %s", where, svc.ID)
+		}
+		if svc.Name == "" {
+			return nil, errors.New("service: name is required")
+		}
+		if net.ParseIP(svc.IP) == nil {
+			return nil, fmt.Errorf("%s: invalid ip %q", where, svc.IP)
+		}
+		if svc.Port < 1 || svc.Port > 65535 {
+			return nil, fmt.Errorf("%s: port must be 1-65535", where)
+		}
+		switch svc.Proto {
+		case "tcp", "udp", "tcp/udp":
+		default:
+			return nil, fmt.Errorf("%s: proto must be tcp, udp, or tcp/udp", where)
+		}
+		byID[svc.ID] = svc
+	}
+	return byID, nil
+}
+
+func (n *NAT) validate(services map[string]Service) error {
 	ids := map[string]bool{}
 	ports := map[string]bool{}
 	for _, pf := range n.PortForwards {
@@ -683,23 +697,16 @@ func (n *NAT) validate() error {
 		if pf.Name == "" {
 			return fmt.Errorf("port forward %s: name is required", pf.ID)
 		}
-		switch pf.Proto {
-		case "tcp", "udp", "tcp/udp":
-		default:
-			return fmt.Errorf("%s: proto must be tcp, udp, or tcp/udp", where)
+		svc, ok := services[pf.ServiceID]
+		if !ok {
+			return fmt.Errorf("%s: unknown service", where)
 		}
 		if pf.WANPort < 1 || pf.WANPort > 65535 {
 			return fmt.Errorf("%s: wan port must be 1-65535", where)
 		}
-		if pf.DestPort < 1 || pf.DestPort > 65535 {
-			return fmt.Errorf("%s: destination port must be 1-65535", where)
-		}
-		if net.ParseIP(pf.DestIP) == nil {
-			return fmt.Errorf("%s: invalid destination ip %q", where, pf.DestIP)
-		}
-		key := pf.Proto + "/" + strconv.Itoa(pf.WANPort)
+		key := svc.Proto + "/" + strconv.Itoa(pf.WANPort)
 		if ports[key] {
-			return fmt.Errorf("%s: wan port %d/%s already forwarded", where, pf.WANPort, pf.Proto)
+			return fmt.Errorf("%s: wan port %d/%s already forwarded", where, pf.WANPort, svc.Proto)
 		}
 		ports[key] = true
 	}

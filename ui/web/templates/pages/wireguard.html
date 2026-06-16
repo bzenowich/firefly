@@ -18,44 +18,9 @@
 <p class="muted">Listens on the WAN interface. Set the public DNS name when the appliance is behind NAT so client configs can dial in.</p>
 
 {{if $srv.Enabled}}
-<h3>Services</h3>
-<p class="muted">Reachable destinations on the network. Each client is default-deny and reaches only the services you grant it.</p>
-{{if $srv.Services}}
-<table>
-  <thead><tr><th>Name</th><th>Address</th><th>Proto</th><th></th></tr></thead>
-  <tbody>
-    {{range $srv.Services}}
-    <tr>
-      <td>{{.Name}}</td>
-      <td class="mono">{{.IP}}:{{.Port}}</td>
-      <td>{{.Proto}}</td>
-      <td class="actions">
-        <form method="post" action="/wireguard/server/services/{{.ID}}/delete">
-          <button type="submit" class="danger">Delete</button>
-        </form>
-      </td>
-    </tr>
-    {{end}}
-  </tbody>
-</table>
-{{else}}
-<p class="muted">No services defined.</p>
-{{end}}
-<form method="post" action="/wireguard/server/services" class="row-form">
-  <label>Name <input name="name" placeholder="NAS" required></label>
-  <label>Host IP <input name="ip" size="14" placeholder="192.168.1.10" required></label>
-  <label>Port <input name="port" size="6" placeholder="443" required></label>
-  <label>Proto
-    <select name="proto">
-      <option value="tcp">tcp</option>
-      <option value="udp">udp</option>
-      <option value="tcp/udp">tcp/udp</option>
-    </select>
-  </label>
-  <button type="submit">Add service</button>
-</form>
-
+{{if not .Cfg.WireGuard.Enabled}}<p class="muted">⚠ WireGuard is disabled — enable it at the top of this page for the server to take effect.</p>{{end}}
 <h3>Clients</h3>
+<p class="muted">Each client is default-deny and reaches only the <a href="/services">services</a> you grant it.</p>
 {{if $srv.Clients}}
 <table>
   <thead><tr><th>Email</th><th>Address</th><th>Last session</th><th>Access</th><th></th></tr></thead>
@@ -66,18 +31,17 @@
       <td class="mono">{{$c.Address}}</td>
       <td class="muted">{{index $.WGSessions $c.ID}}</td>
       <td>
-        <form method="post" action="/wireguard/server/clients/{{$c.ID}}" class="grant-form">
-          {{range $srv.Services}}
-          <label class="check"><input type="checkbox" name="service_ids" value="{{.ID}}" {{if contains $c.ServiceIDs .ID}}checked{{end}}> {{.Name}}</label>
-          {{end}}
-          <button type="submit">Save access</button>
-        </form>
+        {{if $.Cfg.Services}}
+        <a href="/wireguard/server/clients/{{$c.ID}}/access" class="button-link">Edit access ({{len $c.ServiceIDs}}/{{len $.Cfg.Services}})</a>
+        {{else}}
+        <span class="muted">no services — add some on the <a href="/services">Services</a> page</span>
+        {{end}}
       </td>
       <td class="actions">
         <a href="/wireguard/server/clients/{{$c.ID}}/config" class="button-link">Config</a>
         <a href="/wireguard/server/clients/{{$c.ID}}/qr.png" class="button-link">QR</a>
         <form method="post" action="/wireguard/server/clients/{{$c.ID}}/email">
-          <button type="submit" {{if not $.Cfg.SMTP.Enabled}}disabled title="configure SMTP below"{{end}}>Email</button>
+          <button type="submit" {{if not $.Cfg.SMTP.Enabled}}disabled title="configure SMTP on the System page"{{end}}>Email</button>
         </form>
         <form method="post" action="/wireguard/server/clients/{{$c.ID}}/delete">
           <button type="submit" class="danger">Delete</button>
@@ -93,16 +57,11 @@
 <h4>Add client</h4>
 <form method="post" action="/wireguard/server/clients" class="row-form">
   <label>Email <input name="email" type="email" placeholder="user@example.com" required></label>
-  {{if $srv.Services}}
-  <span class="grant-form">
-    {{range $srv.Services}}
-    <label class="check"><input type="checkbox" name="service_ids" value="{{.ID}}"> {{.Name}}</label>
-    {{end}}
-  </span>
-  {{end}}
   <button type="submit">Add</button>
 </form>
-<p class="muted">Generates a keypair, assigns the next free tunnel IP, and (if SMTP is configured) emails the config. Grant service access now or later.</p>
+<p class="muted">Generates a keypair, assigns the next free tunnel IP, and (if SMTP is configured on the System page) emails the config. New clients start with no access — grant services with <strong>Edit access</strong>.</p>
+{{else}}
+<p class="muted">Check <strong>Enabled</strong> above and Save to add clients.</p>
 {{end}}
 
 <h2>Site-to-site tunnels</h2>
@@ -175,23 +134,4 @@
   <button type="submit">Add</button>
 </form>
 <!-- TODO: live handshake status from wg(8) -->
-
-{{$m := .Cfg.SMTP}}
-<h2>Email (SMTP relay)</h2>
-<p class="muted">Used to email client configs. Leave the host blank to disable email — configs can still be downloaded or scanned as a QR code.</p>
-<form method="post" action="/wireguard/smtp" class="row-form">
-  <label>Host <input name="host" value="{{$m.Host}}" size="20" placeholder="smtp.example.com"></label>
-  <label>Port <input name="port" value="{{if $m.Port}}{{$m.Port}}{{end}}" size="6" placeholder="587"></label>
-  <label>Security
-    <select name="security">
-      <option value="starttls" {{if eq $m.Security "starttls"}}selected{{end}}>STARTTLS</option>
-      <option value="tls" {{if eq $m.Security "tls"}}selected{{end}}>TLS</option>
-      <option value="none" {{if eq $m.Security "none"}}selected{{end}}>None</option>
-    </select>
-  </label>
-  <label>From <input name="from" value="{{$m.From}}" size="22" placeholder="firewall@example.com"></label>
-  <label>Username <input name="username" value="{{$m.Username}}" size="16" placeholder="optional"></label>
-  <label>Password <input name="password" type="password" value="{{$m.Password}}" size="16" placeholder="optional"></label>
-  <button type="submit">Save</button>
-</form>
 {{end}}

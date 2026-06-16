@@ -126,5 +126,24 @@
   <button type="submit" class="danger">Save</button>
 </form>
 
+<h2>Email (SMTP relay)</h2>
+{{$m := .Cfg.SMTP}}
+<p class="muted">Outbound mail relay, used to email WireGuard client configs and (later) status and alert notifications. Leave the host blank to disable email.</p>
+<form method="post" action="/system/smtp" class="row-form">
+  <label>Host <input name="host" value="{{$m.Host}}" size="20" placeholder="smtp.example.com"></label>
+  <label>Port <input name="port" value="{{if $m.Port}}{{$m.Port}}{{end}}" size="6" placeholder="587"></label>
+  <label>Security
+    <select name="security">
+      <option value="starttls" {{if eq $m.Security "starttls"}}selected{{end}}>STARTTLS</option>
+      <option value="tls" {{if eq $m.Security "tls"}}selected{{end}}>TLS</option>
+      <option value="none" {{if eq $m.Security "none"}}selected{{end}}>None</option>
+    </select>
+  </label>
+  <label>From <input name="from" value="{{$m.From}}" size="22" placeholder="firewall@example.com"></label>
+  <label>Username <input name="username" value="{{$m.Username}}" size="16" placeholder="optional"></label>
+  <label>Password <input name="password" type="password" value="{{$m.Password}}" size="16" placeholder="optional"></label>
+  <button type="submit">Save</button>
+</form>
+
 <!-- TODO: updates via boot environments, certificates, reboot/halt -->
 {{end}}

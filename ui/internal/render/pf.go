@@ -121,7 +121,7 @@ func wgServerRules(b *strings.Builder, cfg config.Config, wan config.Interface) 
 	for _, c := range s.Clients {
 		clientIP := strings.SplitN(c.Address, "/", 2)[0]
 		for _, id := range c.ServiceIDs {
-			svc, ok := s.Service(id)
+			svc, ok := cfg.Service(id)
 			if !ok {
 				continue
 			}
@@ -163,12 +163,37 @@ func proto(p string) string {
 	return p
 }
 
-func enabledForwards(cfg config.Config) []config.PortForward {
-	var out []config.PortForward
+// resolvedForward is a port forward with its destination resolved from the
+// referenced service, so the rdr/pass renderers don't repeat the lookup.
+type resolvedForward struct {
+	Name     string
+	Proto    string
+	WANPort  int
+	DestIP   string
+	DestPort int
+}
+
+// enabledForwards returns the enabled port forwards with their service
+// destinations resolved. Forwards whose service is missing are skipped;
+// Validate guarantees the reference exists, so that only guards rendering of a
+// transiently inconsistent config.
+func enabledForwards(cfg config.Config) []resolvedForward {
+	var out []resolvedForward
 	for _, pf := range cfg.NAT.PortForwards {
-		if pf.Enabled {
-			out = append(out, pf)
+		if !pf.Enabled {
+			continue
 		}
+		svc, ok := cfg.Service(pf.ServiceID)
+		if !ok {
+			continue
+		}
+		out = append(out, resolvedForward{
+			Name:     pf.Name,
+			Proto:    svc.Proto,
+			WANPort:  pf.WANPort,
+			DestIP:   svc.IP,
+			DestPort: svc.Port,
+		})
 	}
 	return out
 }

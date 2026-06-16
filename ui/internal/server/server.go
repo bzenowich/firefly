@@ -38,6 +38,7 @@ type Page struct {
 // and is appended to the nav per-request only when Shell.Enabled.
 var pages = []Page{
 	{Path: "/", Title: "Dashboard", tmpl: "dashboard.html"},
+	{Path: "/services", Title: "Services", tmpl: "services.html"},
 	{Path: "/nat", Title: "NAT", tmpl: "nat.html"},
 	{Path: "/dhcp", Title: "DHCP", tmpl: "dhcp.html"},
 	{Path: "/dns", Title: "DNS", tmpl: "dns.html"},
@@ -76,6 +77,19 @@ type Server struct {
 var funcs = template.FuncMap{
 	"humanBytes": humanBytes,
 	"contains":   contains,
+	"service":    serviceByID,
+}
+
+// serviceByID resolves a service for display in templates (NAT shows the
+// destination of the service a port forward references). Returns a zero Service
+// if the id is unknown, so the template renders blanks rather than erroring.
+func serviceByID(services []config.Service, id string) config.Service {
+	for _, svc := range services {
+		if svc.ID == id {
+			return svc
+		}
+	}
+	return config.Service{}
 }
 
 // contains reports whether v is in the slice; used by the WireGuard template to
@@ -144,6 +158,18 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStor
 	s.mux.HandleFunc("GET /shell", s.handleShellPage)
 	s.mux.HandleFunc("GET /shell/ws", s.handleShellWS)
 
+	// The per-client WireGuard access editor is a sub-page (not in the nav),
+	// rendered with the shared layout like the shell page.
+	accessTmpl, err := template.New("layout.html").Funcs(funcs).ParseFS(web.FS,
+		"templates/layout.html",
+		"templates/partials/*.html",
+		"templates/pages/wg_access.html",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("parse wg_access.html: %w", err)
+	}
+	s.tmpls[wgAccessKey] = accessTmpl
+
 	static, err := fs.Sub(web.FS, "static")
 	if err != nil {
 		return nil, err
@@ -170,6 +196,7 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStor
 	s.mux.HandleFunc("POST /nat/forwards/{id}/toggle", s.handleForwardToggle)
 	s.mux.HandleFunc("POST /nat/forwards/{id}/delete", s.handleForwardDelete)
 
+	s.routesServices()
 	s.routesDHCP()
 	s.routesDNS()
 	s.routesWireGuard()
@@ -473,24 +500,19 @@ func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
 	redirect(w, r, "/system", s.mgr.Rollback())
 }
 
-// parseForward reads port-forward form fields; semantic checks (port ranges,
-// IP syntax, duplicates) are config.Validate's job.
+// parseForward reads port-forward form fields; semantic checks (port range,
+// service existence, duplicates) are config.Validate's job. The destination
+// comes from the referenced service, not the form.
 func parseForward(r *http.Request) (config.PortForward, error) {
 	wanPort, err := strconv.Atoi(r.FormValue("wan_port"))
 	if err != nil {
 		return config.PortForward{}, errors.New("wan port must be a number")
 	}
-	destPort, err := strconv.Atoi(r.FormValue("dest_port"))
-	if err != nil {
-		return config.PortForward{}, errors.New("destination port must be a number")
-	}
 	return config.PortForward{
-		Name:     strings.TrimSpace(r.FormValue("name")),
-		Proto:    r.FormValue("proto"),
-		WANPort:  wanPort,
-		DestIP:   strings.TrimSpace(r.FormValue("dest_ip")),
-		DestPort: destPort,
-		Enabled:  r.FormValue("enabled") == "on",
+		Name:      strings.TrimSpace(r.FormValue("name")),
+		ServiceID: strings.TrimSpace(r.FormValue("service_id")),
+		WANPort:   wanPort,
+		Enabled:   r.FormValue("enabled") == "on",
 	}, nil
 }
 

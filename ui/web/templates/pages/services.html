@@ -1,0 +1,61 @@
+{{define "content"}}
+<h1>Services</h1>
+<p class="muted">Reusable destinations on your network — a host, port, and protocol named once and referenced from NAT port forwards and WireGuard remote-access grants.</p>
+
+{{if .Cfg.Services}}
+<table>
+  <thead><tr><th>Name</th><th>Address</th><th>Proto</th><th></th></tr></thead>
+  <tbody>
+    {{range .Cfg.Services}}
+    {{if eq .ID $.EditID}}
+    <tr>
+      <td colspan="4">
+        <form method="post" action="/services/{{.ID}}" class="row-form">
+          <input name="name" value="{{.Name}}" placeholder="name" required>
+          <input name="ip" value="{{.IP}}" size="15" placeholder="192.168.1.10" required>
+          <input name="port" value="{{.Port}}" size="6" required>
+          <select name="proto">
+            <option {{if eq .Proto "tcp"}}selected{{end}}>tcp</option>
+            <option {{if eq .Proto "udp"}}selected{{end}}>udp</option>
+            <option {{if eq .Proto "tcp/udp"}}selected{{end}}>tcp/udp</option>
+          </select>
+          <button type="submit">Save</button>
+          <a href="/services" class="button-link">Cancel</a>
+        </form>
+      </td>
+    </tr>
+    {{else}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td class="mono">{{.IP}}:{{.Port}}</td>
+      <td>{{.Proto}}</td>
+      <td class="actions">
+        <a href="/services?edit={{.ID}}" class="button-link">Edit</a>
+        <form method="post" action="/services/{{.ID}}/delete">
+          <button type="submit" class="danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No services defined.</p>
+{{end}}
+
+<h2>Add service</h2>
+<form method="post" action="/services" class="row-form">
+  <label>Name <input name="name" placeholder="NAS" required></label>
+  <label>Host IP <input name="ip" size="15" placeholder="192.168.1.10" required></label>
+  <label>Port <input name="port" size="6" placeholder="443" required></label>
+  <label>Proto
+    <select name="proto">
+      <option>tcp</option>
+      <option>udp</option>
+      <option>tcp/udp</option>
+    </select>
+  </label>
+  <button type="submit">Add</button>
+</form>
+{{end}}

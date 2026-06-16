@@ -21,12 +21,8 @@ func TestWGServerClientFlow(t *testing.T) {
 		t.Fatal("server key not generated on enable")
 	}
 
-	// A service to grant.
-	svc := url.Values{"name": {"NAS"}, "ip": {"192.168.1.10"}, "port": {"443"}, "proto": {"tcp"}}
-	if loc := c.post(t, "/wireguard/server/services", svc); loc.Query().Get("err") != "" {
-		t.Fatalf("service create: %s", loc.Query().Get("err"))
-	}
-	svcID := store.Get().WireGuard.Server.Services[0].ID
+	// A service to grant (from the shared Services catalog).
+	svcID := makeService(t, c, store)
 
 	// Add a client granted that service: keypair generated, IP auto-assigned.
 	cl := url.Values{"email": {"user@example.com"}, "service_ids": {svcID}}
@@ -71,17 +67,24 @@ func TestWGServerClientFlow(t *testing.T) {
 		t.Fatalf("qr: status %d type %s", w.Code, w.Header().Get("Content-Type"))
 	}
 
-	// Updating grants replaces the set.
-	if loc := c.post(t, "/wireguard/server/clients/"+got.ID, url.Values{}); loc.Query().Get("err") != "" {
+	// Updating grants persists the ticked set...
+	if loc := c.post(t, "/wireguard/server/clients/"+got.ID, url.Values{"service_ids": {svcID}}); loc.Query().Get("err") != "" {
 		t.Fatalf("grant update: %s", loc.Query().Get("err"))
+	}
+	if ids := store.Get().WireGuard.Server.Clients[0].ServiceIDs; len(ids) != 1 || ids[0] != svcID {
+		t.Fatalf("grant not saved on update: %+v", ids)
+	}
+	// ...and an empty post clears it (default-deny reset).
+	if loc := c.post(t, "/wireguard/server/clients/"+got.ID, url.Values{}); loc.Query().Get("err") != "" {
+		t.Fatalf("grant clear: %s", loc.Query().Get("err"))
 	}
 	if len(store.Get().WireGuard.Server.Clients[0].ServiceIDs) != 0 {
 		t.Fatal("grant not cleared on update")
 	}
 
-	// Deleting the service prunes any dangling grant (re-grant first).
+	// Deleting the service prunes any dangling client grant (re-grant first).
 	c.post(t, "/wireguard/server/clients/"+got.ID, url.Values{"service_ids": {svcID}})
-	if loc := c.post(t, "/wireguard/server/services/"+svcID+"/delete", url.Values{}); loc.Query().Get("err") != "" {
+	if loc := c.post(t, "/services/"+svcID+"/delete", url.Values{}); loc.Query().Get("err") != "" {
 		t.Fatalf("service delete: %s", loc.Query().Get("err"))
 	}
 	if len(store.Get().WireGuard.Server.Clients[0].ServiceIDs) != 0 {
@@ -102,6 +105,33 @@ func TestWGServerClientFlow(t *testing.T) {
 	}
 }
 
+func TestWGClientAccessPage(t *testing.T) {
+	c, store := newTestServer(t)
+	c.post(t, "/wireguard/settings", url.Values{"enabled": {"on"}})
+	c.post(t, "/wireguard/server", url.Values{"enabled": {"on"}, "address": {"10.9.0.1/24"}})
+	svcID := makeService(t, c, store)
+	c.post(t, "/wireguard/server/clients", url.Values{"email": {"user@example.com"}, "service_ids": {svcID}})
+	id := store.Get().WireGuard.Server.Clients[0].ID
+
+	w := c.get(t, "/wireguard/server/clients/"+id+"/access")
+	if w.Code != 200 {
+		t.Fatalf("access page: status %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "user@example.com") {
+		t.Error("access page missing client email")
+	}
+	// The granted service's checkbox must render checked.
+	if !strings.Contains(body, `value="`+svcID+`" checked`) {
+		t.Errorf("granted service not pre-checked:\n%s", body)
+	}
+
+	// Unknown client is a 404.
+	if w = c.get(t, "/wireguard/server/clients/nope/access"); w.Code != 404 {
+		t.Fatalf("unknown client: want 404, got %d", w.Code)
+	}
+}
+
 func TestWGClientRequiresEnabledServer(t *testing.T) {
 	c, _ := newTestServer(t)
 	c.post(t, "/wireguard/settings", url.Values{"enabled": {"on"}})
@@ -119,7 +149,7 @@ func TestSMTPSettings(t *testing.T) {
 		"from": {"fw@example.com"}, "security": {"starttls"},
 		"username": {"u"}, "password": {"p"},
 	}
-	if loc := c.post(t, "/wireguard/smtp", form); loc.Query().Get("err") != "" {
+	if loc := c.post(t, "/system/smtp", form); loc.Query().Get("err") != "" {
 		t.Fatalf("smtp save: %s", loc.Query().Get("err"))
 	}
 	m := store.Get().SMTP
@@ -127,7 +157,7 @@ func TestSMTPSettings(t *testing.T) {
 		t.Fatalf("smtp not stored: %+v", m)
 	}
 	// A host without a from address is rejected by validation.
-	if loc := c.post(t, "/wireguard/smtp", url.Values{"host": {"x"}}); loc.Query().Get("err") == "" {
+	if loc := c.post(t, "/system/smtp", url.Values{"host": {"x"}}); loc.Query().Get("err") == "" {
 		t.Fatal("smtp host without from should fail validation")
 	}
 }
