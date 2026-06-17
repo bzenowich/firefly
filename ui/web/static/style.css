@@ -194,3 +194,45 @@ main.login button { width: 100%; margin-top: 0.4rem; }
   border-radius: 6px;
   background: #14181d;
 }
+
+/* Phone/tablet layout. The hamburger toggles the sidebar via a CSS-only
+   checkbox (#nav-toggle in layout.html); no JS involved. Hidden on desktop. */
+.nav-burger { display: none; }
+
+@media (max-width: 768px) {
+  header { flex-wrap: wrap; gap: 0.6rem; }
+  .nav-burger {
+    display: inline-flex;
+    align-items: center;
+    font-size: 1.4rem;
+    line-height: 1;
+    color: var(--text);
+    cursor: pointer;
+    padding: 0 0.2rem;
+    user-select: none;
+  }
+
+  .wrap { flex-direction: column; min-height: 0; }
+
+  /* Sidebar collapses to a drawer: hidden until the burger is checked. */
+  nav {
+    display: none;
+    width: 100%;
+    padding: 0.4rem 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  #nav-toggle:checked ~ .wrap nav { display: flex; }
+  nav a { padding: 0.7rem 1.2rem; }       /* ~44px tap target */
+  nav a.active { padding-left: calc(1.2rem - 3px); }
+
+  main { max-width: none; padding: 1rem; }
+
+  .card { min-width: 0; flex: 1 1 100%; }
+
+  /* Wide tables (logs, leases, traffic) scroll instead of overflowing. */
+  table { display: block; overflow-x: auto; white-space: nowrap; }
+
+  .shell-term { height: 60vh; }
+  .embed { height: 65vh; }
+}

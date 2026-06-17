@@ -8,7 +8,9 @@
   <script src="/static/htmx.min.js"></script>
 </head>
 <body>
+  <input type="checkbox" id="nav-toggle" class="nav-toggle" hidden>
   <header>
+    <label for="nav-toggle" class="nav-burger" aria-label="Toggle navigation">&#9776;</label>
     <span class="brand">firewall</span><!-- TODO: product name (plan.md §12) -->
     <span class="host">{{.Cfg.System.Hostname}}.{{.Cfg.System.Domain}}</span>
     <form method="post" action="/logout" class="logout">
