@@ -10,25 +10,44 @@ import (
 )
 
 func (s *Server) routesDHCP() {
-	s.mux.HandleFunc("POST /dhcp/settings", s.handleDHCPSettings)
-	s.mux.HandleFunc("POST /dhcp/leases", s.handleLeaseCreate)
-	s.mux.HandleFunc("POST /dhcp/leases/{mac}", s.handleLeaseUpdate)
-	s.mux.HandleFunc("POST /dhcp/leases/{mac}/delete", s.handleLeaseDelete)
+	s.mux.HandleFunc("POST /dhcp/{iface}/settings", s.handleDHCPSettings)
+	s.mux.HandleFunc("POST /dhcp/{iface}/leases", s.handleLeaseCreate)
+	s.mux.HandleFunc("POST /dhcp/{iface}/leases/{mac}", s.handleLeaseUpdate)
+	s.mux.HandleFunc("POST /dhcp/{iface}/leases/{mac}/delete", s.handleLeaseDelete)
+}
+
+// updateDHCP builds a Store.Update mutation against one interface's DHCP
+// server, creating it if this interface has none yet so the first save from
+// the page works without a separate "add server" step.
+func updateDHCP(iface string, fn func(*config.DHCPServer)) func(*config.Config) error {
+	return func(c *config.Config) error {
+		for i := range c.DHCP {
+			if c.DHCP[i].Interface == iface {
+				fn(&c.DHCP[i])
+				return nil
+			}
+		}
+		d := config.DHCPServer{Interface: iface}
+		fn(&d)
+		c.DHCP = append(c.DHCP, d)
+		return nil
+	}
 }
 
 func (s *Server) handleDHCPSettings(w http.ResponseWriter, r *http.Request) {
+	iface := r.PathValue("iface")
 	lease, err := strconv.Atoi(r.FormValue("lease_seconds"))
 	if err != nil {
 		redirect(w, r, "/dhcp", errors.New("lease must be a number of seconds"))
 		return
 	}
-	err = s.store.Update(func(c *config.Config) error {
-		c.DHCP.Enabled = r.FormValue("enabled") == "on"
-		c.DHCP.RangeStart = strings.TrimSpace(r.FormValue("range_start"))
-		c.DHCP.RangeEnd = strings.TrimSpace(r.FormValue("range_end"))
-		c.DHCP.LeaseSeconds = lease
-		return nil
-	})
+	enabled := r.FormValue("enabled") == "on"
+	err = s.store.Update(updateDHCP(iface, func(d *config.DHCPServer) {
+		d.Enabled = enabled
+		d.RangeStart = strings.TrimSpace(r.FormValue("range_start"))
+		d.RangeEnd = strings.TrimSpace(r.FormValue("range_end"))
+		d.LeaseSeconds = lease
+	}))
 	redirect(w, r, "/dhcp", err)
 }
 
@@ -41,39 +60,52 @@ func parseLease(r *http.Request) config.StaticLease {
 }
 
 func (s *Server) handleLeaseCreate(w http.ResponseWriter, r *http.Request) {
+	iface := r.PathValue("iface")
 	lease := parseLease(r)
-	err := s.store.Update(func(c *config.Config) error {
-		c.DHCP.StaticLeases = append(c.DHCP.StaticLeases, lease)
-		return nil
-	})
+	err := s.store.Update(updateDHCP(iface, func(d *config.DHCPServer) {
+		d.StaticLeases = append(d.StaticLeases, lease)
+	}))
 	redirect(w, r, "/dhcp", err)
 }
 
 func (s *Server) handleLeaseUpdate(w http.ResponseWriter, r *http.Request) {
-	mac := r.PathValue("mac")
+	iface, mac := r.PathValue("iface"), r.PathValue("mac")
 	lease := parseLease(r)
-	err := s.store.Update(func(c *config.Config) error {
-		for i := range c.DHCP.StaticLeases {
-			if c.DHCP.StaticLeases[i].MAC == mac {
-				c.DHCP.StaticLeases[i] = lease
+	err := s.store.Update(forDHCP(iface, func(d *config.DHCPServer) error {
+		for i := range d.StaticLeases {
+			if d.StaticLeases[i].MAC == mac {
+				d.StaticLeases[i] = lease
 				return nil
 			}
 		}
 		return errors.New("static lease not found")
-	})
+	}))
 	redirect(w, r, "/dhcp", err)
 }
 
 func (s *Server) handleLeaseDelete(w http.ResponseWriter, r *http.Request) {
-	mac := r.PathValue("mac")
-	err := s.store.Update(func(c *config.Config) error {
-		for i, l := range c.DHCP.StaticLeases {
+	iface, mac := r.PathValue("iface"), r.PathValue("mac")
+	err := s.store.Update(forDHCP(iface, func(d *config.DHCPServer) error {
+		for i, l := range d.StaticLeases {
 			if l.MAC == mac {
-				c.DHCP.StaticLeases = append(c.DHCP.StaticLeases[:i], c.DHCP.StaticLeases[i+1:]...)
+				d.StaticLeases = append(d.StaticLeases[:i], d.StaticLeases[i+1:]...)
 				return nil
 			}
 		}
 		return errors.New("static lease not found")
-	})
+	}))
 	redirect(w, r, "/dhcp", err)
+}
+
+// forDHCP runs fn against an existing DHCP server, erroring if the interface
+// has none. Used by lease edits, which must target a configured server.
+func forDHCP(iface string, fn func(*config.DHCPServer) error) func(*config.Config) error {
+	return func(c *config.Config) error {
+		for i := range c.DHCP {
+			if c.DHCP[i].Interface == iface {
+				return fn(&c.DHCP[i])
+			}
+		}
+		return errors.New("dhcp server not found")
+	}
 }

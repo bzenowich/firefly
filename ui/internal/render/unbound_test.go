@@ -48,7 +48,7 @@ func TestUnboundFull(t *testing.T) {
 
 func TestUnboundNeedsInternalAddress(t *testing.T) {
 	cfg := config.Default()
-	cfg.DHCP.Enabled = false // LAN without address is otherwise invalid
+	cfg.DHCP[0].Enabled = false // LAN without address is otherwise invalid
 	cfg.Interfaces[1].IPv4 = ""
 	if _, err := Unbound(cfg); err == nil {
 		t.Fatal("want error without internal addresses")

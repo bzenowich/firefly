@@ -373,6 +373,8 @@ type pageData struct {
 	TOTPEnrolled bool // logged-in user has 2FA active
 	TOTPPending  bool // enrollment QR awaiting confirmation
 
+	Timezones []string // System page timezone dropdown options
+
 	Logs      []logs.Entry // Logs page only
 	LogFilter logs.Filter
 
@@ -406,6 +408,9 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		s.totpMu.Unlock()
 	}
 	d.ApplyDeadline, d.ApplyPending = s.mgr.Pending()
+	if p.Path == "/system" {
+		d.Timezones = config.Timezones()
+	}
 	if p.Path == "/wireguard" {
 		d.WGSessions = s.wgSessions(d.Cfg)
 	}

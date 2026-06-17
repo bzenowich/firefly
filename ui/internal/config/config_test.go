@@ -107,21 +107,27 @@ func TestValidateDHCP(t *testing.T) {
 	}{
 		{"default ok", func(c *Config) {}, ""},
 		{"disabled skips checks", func(c *Config) {
-			c.DHCP.Enabled = false
-			c.DHCP.RangeStart = "garbage"
+			c.DHCP[0].Enabled = false
+			c.DHCP[0].RangeStart = "garbage"
 		}, ""},
-		{"pool outside lan", func(c *Config) { c.DHCP.RangeEnd = "10.9.9.9" }, "inside"},
-		{"bad range ip", func(c *Config) { c.DHCP.RangeStart = "nope" }, "invalid pool"},
-		{"lease too short", func(c *Config) { c.DHCP.LeaseSeconds = 5 }, "at least 60"},
+		{"pool outside lan", func(c *Config) { c.DHCP[0].RangeEnd = "10.9.9.9" }, "inside"},
+		{"bad range ip", func(c *Config) { c.DHCP[0].RangeStart = "nope" }, "invalid pool"},
+		{"lease too short", func(c *Config) { c.DHCP[0].LeaseSeconds = 5 }, "at least 60"},
 		{"lan needs static ip", func(c *Config) {
 			c.Interfaces[1].IPv4 = ""
 			c.Interfaces[1].DHCPClient = true
 		}, "static address"},
+		{"unknown interface", func(c *Config) {
+			c.DHCP[0].Interface = "ghost"
+		}, "unknown interface"},
+		{"dhcp on wan rejected", func(c *Config) {
+			c.DHCP = append(c.DHCP, DHCPServer{Interface: "WAN"})
+		}, "not allowed on the wan"},
 		{"bad lease mac", func(c *Config) {
-			c.DHCP.StaticLeases = []StaticLease{{MAC: "zz:zz", IP: "192.168.1.5", Hostname: "x"}}
+			c.DHCP[0].StaticLeases = []StaticLease{{MAC: "zz:zz", IP: "192.168.1.5", Hostname: "x"}}
 		}, "invalid mac"},
 		{"lease ip outside lan", func(c *Config) {
-			c.DHCP.StaticLeases = []StaticLease{{MAC: "00:0d:b9:51:ab:cd", IP: "10.1.1.1", Hostname: "x"}}
+			c.DHCP[0].StaticLeases = []StaticLease{{MAC: "00:0d:b9:51:ab:cd", IP: "10.1.1.1", Hostname: "x"}}
 		}, "inside"},
 	}
 	for _, tc := range cases {
@@ -198,7 +204,7 @@ func TestValidateInterfaces(t *testing.T) {
 		{"bad cidr", func(c *Config) { c.Interfaces[1].IPv4 = "192.168.1.1" }, "must be CIDR"},
 		{"lan without address", func(c *Config) {
 			c.Interfaces[1].IPv4 = ""
-			c.DHCP.Enabled = false
+			c.DHCP[0].Enabled = false
 		}, "lan needs a static address"},
 		{"wan without address or dhcp", func(c *Config) { c.Interfaces[0].DHCPClient = false }, "wan needs dhcp"},
 		{"wan static ok", func(c *Config) {

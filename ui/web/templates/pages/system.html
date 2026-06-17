@@ -7,6 +7,73 @@
   </label>
   <button type="submit">Save</button>
 </form>
+<h2>Time</h2>
+<form method="post" action="/system/time" class="row-form">
+  <label>Timezone
+    <select name="timezone">
+      {{$tz := .Cfg.System.Timezone}}
+      {{range .Timezones}}
+      <option value="{{.}}" {{if eq . $tz}}selected{{end}}>{{.}}</option>
+      {{end}}
+    </select>
+  </label>
+  <button type="submit">Save</button>
+</form>
+<h3>NTP servers</h3>
+<table>
+  <thead><tr><th>Server</th><th>Latency</th><th></th></tr></thead>
+  <tbody>
+    {{range $i, $n := .Cfg.System.NTPServers}}
+    <tr>
+      <td class="mono">{{$n}}</td>
+      <td><span id="ntptest-{{$i}}" class="muted">—</span></td>
+      <td class="actions">
+        <button type="button" class="secondary"
+                hx-get="/system/ntp/test?server={{urlquery $n}}"
+                hx-target="#ntptest-{{$i}}" hx-swap="innerHTML">Test</button>
+        <form method="post" action="/system/ntp/servers/delete">
+          <input type="hidden" name="server" value="{{$n}}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+<form method="post" action="/system/ntp/servers" class="row-form">
+  <label>NTP server <input name="server" placeholder="pool.ntp.org" required></label>
+  <button type="submit">Add</button>
+</form>
+
+<h2>WAN DNS servers</h2>
+<p class="muted">Upstream resolvers the appliance forwards to. An optional hostname turns on DNS-over-TLS and is the name verified against the server's certificate.</p>
+<table>
+  <thead><tr><th>Address</th><th>TLS hostname</th><th>Latency</th><th></th></tr></thead>
+  <tbody>
+    {{range $i, $d := .Cfg.System.DNSServers}}
+    <tr>
+      <td class="mono">{{$d.Address}}</td>
+      <td class="mono">{{if $d.Hostname}}{{$d.Hostname}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td><span id="dnstest-{{$i}}" class="muted">—</span></td>
+      <td class="actions">
+        <button type="button" class="secondary"
+                hx-get="/system/dns/test?address={{urlquery $d.Address}}&amp;hostname={{urlquery $d.Hostname}}"
+                hx-target="#dnstest-{{$i}}" hx-swap="innerHTML">Test</button>
+        <form method="post" action="/system/dns/servers/delete">
+          <input type="hidden" name="address" value="{{$d.Address}}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+<form method="post" action="/system/dns/servers" class="row-form">
+  <label>Address <input name="address" placeholder="1.1.1.1" required></label>
+  <label>TLS hostname <input name="hostname" placeholder="cloudflare-dns.com (optional)" size="22"></label>
+  <button type="submit">Add</button>
+</form>
+
 <h2>Apply</h2>
 {{if not .ApplyPending}}
 <form method="post" action="/system/apply">

@@ -21,7 +21,7 @@ func TestKeaDefault(t *testing.T) {
 
 func TestKeaStaticLeases(t *testing.T) {
 	cfg := config.Default()
-	cfg.DHCP.StaticLeases = []config.StaticLease{
+	cfg.DHCP[0].StaticLeases = []config.StaticLease{
 		{MAC: "00:0d:b9:51:ab:cd", IP: "192.168.1.5", Hostname: "nas"},
 		{MAC: "00:0d:b9:51:ab:ce", IP: "192.168.1.6", Hostname: "printer"},
 	}

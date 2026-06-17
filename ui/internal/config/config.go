@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -20,18 +21,18 @@ import (
 )
 
 type Config struct {
-	Version    int         `json:"version"`
-	System     System      `json:"system"`
-	Interfaces []Interface `json:"interfaces"`
-	Services   []Service   `json:"services"`
-	NAT        NAT         `json:"nat"`
-	DHCP       DHCP        `json:"dhcp"`
-	DNS        DNS         `json:"dns"`
-	WireGuard  WireGuard   `json:"wireguard"`
-	Visibility Visibility  `json:"visibility"`
-	Shell      Shell       `json:"shell"`
-	SMTP       SMTP        `json:"smtp"`
-	Users      []User      `json:"users"`
+	Version    int          `json:"version"`
+	System     System       `json:"system"`
+	Interfaces []Interface  `json:"interfaces"`
+	Services   []Service    `json:"services"`
+	NAT        NAT          `json:"nat"`
+	DHCP       []DHCPServer `json:"dhcp"`
+	DNS        DNS          `json:"dns"`
+	WireGuard  WireGuard    `json:"wireguard"`
+	Visibility Visibility   `json:"visibility"`
+	Shell      Shell        `json:"shell"`
+	SMTP       SMTP         `json:"smtp"`
+	Users      []User       `json:"users"`
 }
 
 // SMTP is the relay the appliance uses to email things to admins and VPN
@@ -164,6 +165,49 @@ type System struct {
 	Hostname string `json:"hostname"`
 	Domain   string `json:"domain"`
 	Timezone string `json:"timezone"`
+	// DNSServers are the upstream resolvers the appliance forwards to. A
+	// non-empty Hostname turns on DNS-over-TLS and is the name verified
+	// against the server's certificate.
+	DNSServers []DNSServer `json:"dns_servers,omitempty"`
+	// NTPServers are the time sources ntpd syncs against (host or host:port).
+	NTPServers []string `json:"ntp_servers,omitempty"`
+}
+
+// DNSServer is one upstream resolver. Address is the IP; Hostname, when set,
+// enables DNS-over-TLS (port 853) and is checked against the presented cert.
+type DNSServer struct {
+	Address  string `json:"address"`
+	Hostname string `json:"hostname,omitempty"`
+}
+
+// Timezones is the fixed list of UTC-offset zones offered on the System page.
+// We expose offsets rather than the full IANA database: the appliance only
+// needs wall-clock offset for logs and schedules, and offsets are unambiguous.
+func Timezones() []string {
+	return []string{
+		"UTC-12:00", "UTC-11:00", "UTC-10:00", "UTC-09:30", "UTC-09:00",
+		"UTC-08:00", "UTC-07:00", "UTC-06:00", "UTC-05:00", "UTC-04:00",
+		"UTC-03:30", "UTC-03:00", "UTC-02:00", "UTC-01:00", "UTC+00:00",
+		"UTC+01:00", "UTC+02:00", "UTC+03:00", "UTC+03:30", "UTC+04:00",
+		"UTC+04:30", "UTC+05:00", "UTC+05:30", "UTC+05:45", "UTC+06:00",
+		"UTC+06:30", "UTC+07:00", "UTC+08:00", "UTC+08:45", "UTC+09:00",
+		"UTC+09:30", "UTC+10:00", "UTC+10:30", "UTC+11:00", "UTC+12:00",
+		"UTC+12:45", "UTC+13:00", "UTC+14:00",
+	}
+}
+
+// validTimezone accepts the offset list plus the bare "UTC" alias, which older
+// configs (and Default before offsets existed) stored for +00:00.
+func validTimezone(tz string) bool {
+	if tz == "UTC" {
+		return true
+	}
+	for _, z := range Timezones() {
+		if z == tz {
+			return true
+		}
+	}
+	return false
 }
 
 // Interface maps a logical role (wan, lan, opt) to a physical device.
@@ -173,6 +217,12 @@ type Interface struct {
 	Device     string `json:"device"`
 	IPv4       string `json:"ipv4,omitempty"` // CIDR; empty when DHCPClient
 	DHCPClient bool   `json:"dhcp_client,omitempty"`
+}
+
+// ServesDHCP reports whether an interface can host a DHCP server: any non-WAN
+// interface with a static address, i.e. a subnet to hand out from.
+func (i Interface) ServesDHCP() bool {
+	return i.Role != "wan" && i.IPv4 != ""
 }
 
 // Service is one reachable destination on the network (host IP + port + proto).
@@ -212,12 +262,28 @@ type PortForward struct {
 	Enabled   bool   `json:"enabled"`
 }
 
-type DHCP struct {
+// DHCPServer is the DHCP service for one interface's subnet. The appliance
+// runs an independent server per non-WAN interface, so each LAN/OPT segment
+// gets its own pool, lease time, and reservations.
+type DHCPServer struct {
+	Interface    string        `json:"interface"` // interface Name this server binds to
 	Enabled      bool          `json:"enabled"`
 	RangeStart   string        `json:"range_start"`
 	RangeEnd     string        `json:"range_end"`
 	LeaseSeconds int           `json:"lease_seconds"`
 	StaticLeases []StaticLease `json:"static_leases"`
+}
+
+// DHCPFor returns the DHCP server bound to the named interface, or a zero
+// server (with Interface set) when none is configured yet, so templates and
+// handlers can treat "absent" and "present" uniformly.
+func (c Config) DHCPFor(iface string) DHCPServer {
+	for _, d := range c.DHCP {
+		if d.Interface == iface {
+			return d
+		}
+	}
+	return DHCPServer{Interface: iface}
 }
 
 type StaticLease struct {
@@ -311,19 +377,24 @@ type WGPeer struct {
 func Default() Config {
 	return Config{
 		Version: 1,
-		System:  System{Hostname: "firewall", Domain: "lan", Timezone: "UTC"},
+		System: System{
+			Hostname: "firewall", Domain: "lan", Timezone: "UTC+00:00",
+			DNSServers: []DNSServer{{Address: "1.1.1.1", Hostname: "cloudflare-dns.com"}},
+			NTPServers: []string{"pool.ntp.org"},
+		},
 		Interfaces: []Interface{
 			{Name: "WAN", Role: "wan", Device: "igc0", DHCPClient: true},
 			{Name: "LAN", Role: "lan", Device: "igc1", IPv4: "192.168.1.1/24"},
 			{Name: "OPT1", Role: "opt", Device: "igc2"},
 		},
 		NAT: NAT{OutboundMode: "automatic"},
-		DHCP: DHCP{
+		DHCP: []DHCPServer{{
+			Interface:    "LAN",
 			Enabled:      true,
 			RangeStart:   "192.168.1.100",
 			RangeEnd:     "192.168.1.199",
 			LeaseSeconds: 7200,
-		},
+		}},
 		DNS: DNS{Enabled: true},
 	}
 }
@@ -331,6 +402,9 @@ func Default() Config {
 func (c *Config) Validate() error {
 	if c.System.Hostname == "" {
 		return errors.New("system: hostname is required")
+	}
+	if err := c.validateSystem(); err != nil {
+		return err
 	}
 	roles := map[string]int{}
 	for _, ifc := range c.Interfaces {
@@ -371,6 +445,36 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateUsers(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c *Config) validateSystem() error {
+	if c.System.Timezone != "" && !validTimezone(c.System.Timezone) {
+		return fmt.Errorf("system: unknown timezone %q", c.System.Timezone)
+	}
+	seen := map[string]bool{}
+	for _, d := range c.System.DNSServers {
+		if net.ParseIP(d.Address) == nil {
+			return fmt.Errorf("system: dns server %q: invalid ip", d.Address)
+		}
+		if seen[d.Address] {
+			return fmt.Errorf("system: dns server %s: duplicate", d.Address)
+		}
+		seen[d.Address] = true
+		if strings.ContainsAny(d.Hostname, " \t") {
+			return fmt.Errorf("system: dns server %s: hostname has whitespace", d.Address)
+		}
+	}
+	ntp := map[string]bool{}
+	for _, n := range c.System.NTPServers {
+		if n == "" || strings.ContainsAny(n, " \t") {
+			return fmt.Errorf("system: ntp server %q: invalid", n)
+		}
+		if ntp[n] {
+			return fmt.Errorf("system: ntp server %s: duplicate", n)
+		}
+		ntp[n] = true
 	}
 	return nil
 }
@@ -608,45 +712,62 @@ func (c *Config) LAN() Interface {
 }
 
 func (c *Config) validateDHCP() error {
-	d := c.DHCP
-	if !d.Enabled {
-		return nil
+	byName := map[string]Interface{}
+	for _, ifc := range c.Interfaces {
+		byName[ifc.Name] = ifc
 	}
-	lan := c.LAN()
-	if lan.IPv4 == "" {
-		return errors.New("dhcp: lan interface needs a static address")
-	}
-	_, lanNet, err := net.ParseCIDR(lan.IPv4)
-	if err != nil {
-		return fmt.Errorf("dhcp: lan address: %w", err)
-	}
-	start, end := net.ParseIP(d.RangeStart), net.ParseIP(d.RangeEnd)
-	if start == nil || end == nil {
-		return errors.New("dhcp: invalid pool range")
-	}
-	if !lanNet.Contains(start) || !lanNet.Contains(end) {
-		return fmt.Errorf("dhcp: pool must be inside %s", lanNet)
-	}
-	if d.LeaseSeconds < 60 {
-		return errors.New("dhcp: lease must be at least 60 seconds")
-	}
-	macs, ips := map[string]bool{}, map[string]bool{}
-	for _, l := range d.StaticLeases {
-		hw, err := net.ParseMAC(l.MAC)
+	seen := map[string]bool{}
+	for _, d := range c.DHCP {
+		where := fmt.Sprintf("dhcp %q", d.Interface)
+		ifc, ok := byName[d.Interface]
+		if !ok {
+			return fmt.Errorf("%s: unknown interface", where)
+		}
+		if ifc.Role == "wan" {
+			return fmt.Errorf("%s: dhcp is not allowed on the wan interface", where)
+		}
+		if seen[d.Interface] {
+			return fmt.Errorf("%s: duplicate dhcp server", where)
+		}
+		seen[d.Interface] = true
+		if !d.Enabled {
+			continue
+		}
+		if ifc.IPv4 == "" {
+			return fmt.Errorf("%s: interface needs a static address", where)
+		}
+		_, ifcNet, err := net.ParseCIDR(ifc.IPv4)
 		if err != nil {
-			return fmt.Errorf("dhcp: static lease %q: invalid mac", l.Hostname)
+			return fmt.Errorf("%s: interface address: %w", where, err)
 		}
-		if macs[hw.String()] {
-			return fmt.Errorf("dhcp: static lease %q: duplicate mac %s", l.Hostname, l.MAC)
+		start, end := net.ParseIP(d.RangeStart), net.ParseIP(d.RangeEnd)
+		if start == nil || end == nil {
+			return fmt.Errorf("%s: invalid pool range", where)
 		}
-		macs[hw.String()] = true
-		if ip := net.ParseIP(l.IP); ip == nil || !lanNet.Contains(ip) {
-			return fmt.Errorf("dhcp: static lease %q: ip must be inside %s", l.Hostname, lanNet)
+		if !ifcNet.Contains(start) || !ifcNet.Contains(end) {
+			return fmt.Errorf("%s: pool must be inside %s", where, ifcNet)
 		}
-		if ips[l.IP] {
-			return fmt.Errorf("dhcp: static lease %q: duplicate ip %s", l.Hostname, l.IP)
+		if d.LeaseSeconds < 60 {
+			return fmt.Errorf("%s: lease must be at least 60 seconds", where)
 		}
-		ips[l.IP] = true
+		macs, ips := map[string]bool{}, map[string]bool{}
+		for _, l := range d.StaticLeases {
+			hw, err := net.ParseMAC(l.MAC)
+			if err != nil {
+				return fmt.Errorf("%s: static lease %q: invalid mac", where, l.Hostname)
+			}
+			if macs[hw.String()] {
+				return fmt.Errorf("%s: static lease %q: duplicate mac %s", where, l.Hostname, l.MAC)
+			}
+			macs[hw.String()] = true
+			if ip := net.ParseIP(l.IP); ip == nil || !ifcNet.Contains(ip) {
+				return fmt.Errorf("%s: static lease %q: ip must be inside %s", where, l.Hostname, ifcNet)
+			}
+			if ips[l.IP] {
+				return fmt.Errorf("%s: static lease %q: duplicate ip %s", where, l.Hostname, l.IP)
+			}
+			ips[l.IP] = true
+		}
 	}
 	return nil
 }
@@ -744,11 +865,54 @@ func Open(path string) (*Store, error) {
 	case err != nil:
 		return nil, err
 	default:
+		data = migrateLegacy(data)
 		if err := json.Unmarshal(data, &s.cfg); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
 	}
 	return s, nil
+}
+
+// migrateLegacy upgrades a pre-per-interface config in which "dhcp" was a
+// single object into the current array form, binding the old settings to the
+// lan interface. Without this, older on-disk configs fail to unmarshal (object
+// vs array). Anything already in array form is returned unchanged.
+func migrateLegacy(data []byte) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return data
+	}
+	d, ok := raw["dhcp"]
+	if !ok {
+		return data
+	}
+	if t := bytes.TrimSpace(d); len(t) == 0 || t[0] != '{' {
+		return data // already an array (or null)
+	}
+	lan := "LAN"
+	if ifsRaw, ok := raw["interfaces"]; ok {
+		var ifs []Interface
+		if json.Unmarshal(ifsRaw, &ifs) == nil {
+			for _, i := range ifs {
+				if i.Role == "lan" {
+					lan = i.Name
+					break
+				}
+			}
+		}
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(d, &obj) != nil {
+		return data
+	}
+	obj["interface"], _ = json.Marshal(lan)
+	objBytes, _ := json.Marshal(obj)
+	raw["dhcp"], _ = json.Marshal([]json.RawMessage{objBytes})
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // Get returns a deep copy of the current configuration, so callers can never

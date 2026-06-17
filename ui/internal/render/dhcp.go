@@ -17,8 +17,6 @@ type kea struct {
 type keaDhcp4 struct {
 	InterfacesConfig keaInterfaces `json:"interfaces-config"`
 	LeaseDatabase    keaLeaseDB    `json:"lease-database"`
-	ValidLifetime    int           `json:"valid-lifetime"`
-	OptionData       []keaOption   `json:"option-data"`
 	Subnet4          []keaSubnet   `json:"subnet4"`
 }
 
@@ -37,10 +35,12 @@ type keaOption struct {
 }
 
 type keaSubnet struct {
-	ID           int              `json:"id"`
-	Subnet       string           `json:"subnet"`
-	Pools        []keaPool        `json:"pools"`
-	Reservations []keaReservation `json:"reservations,omitempty"`
+	ID            int              `json:"id"`
+	Subnet        string           `json:"subnet"`
+	Pools         []keaPool        `json:"pools"`
+	ValidLifetime int              `json:"valid-lifetime"`
+	OptionData    []keaOption      `json:"option-data"`
+	Reservations  []keaReservation `json:"reservations,omitempty"`
 }
 
 type keaPool struct {
@@ -53,41 +53,57 @@ type keaReservation struct {
 	Hostname  string `json:"hostname,omitempty"`
 }
 
-// KeaDHCP4 renders kea-dhcp4.conf for the LAN. The firewall's LAN address is
-// handed out as both router and DNS (Unbound runs locally). Whether the
-// service runs at all is rc.conf's decision at apply time, so a config is
-// rendered even when DHCP is disabled.
+// KeaDHCP4 renders kea-dhcp4.conf. Each enabled per-interface DHCP server
+// becomes its own subnet; that interface's address is handed out as both
+// router and DNS (Unbound runs locally). Disabled servers and the WAN are
+// skipped. Whether the service runs at all is rc.conf's decision at apply
+// time, so a config is rendered even when no server is enabled.
 func KeaDHCP4(cfg config.Config) (string, error) {
-	lan := cfg.LAN()
-	if lan.IPv4 == "" {
-		return "", fmt.Errorf("kea: lan interface needs a static address")
-	}
-	lanIP, lanNet, err := net.ParseCIDR(lan.IPv4)
-	if err != nil {
-		return "", fmt.Errorf("kea: lan address: %w", err)
+	byName := map[string]config.Interface{}
+	for _, ifc := range cfg.Interfaces {
+		byName[ifc.Name] = ifc
 	}
 
 	k := kea{Dhcp4: keaDhcp4{
-		InterfacesConfig: keaInterfaces{Interfaces: []string{lan.Device}},
-		LeaseDatabase:    keaLeaseDB{Type: "memfile", Persist: true},
-		ValidLifetime:    cfg.DHCP.LeaseSeconds,
-		OptionData: []keaOption{
-			{Name: "routers", Data: lanIP.String()},
-			{Name: "domain-name-servers", Data: lanIP.String()},
-			{Name: "domain-name", Data: cfg.System.Domain},
-		},
-		Subnet4: []keaSubnet{{
-			ID:     1,
-			Subnet: lanNet.String(),
-			Pools:  []keaPool{{Pool: cfg.DHCP.RangeStart + " - " + cfg.DHCP.RangeEnd}},
-		}},
+		LeaseDatabase: keaLeaseDB{Type: "memfile", Persist: true},
 	}}
-	for _, l := range cfg.DHCP.StaticLeases {
-		k.Dhcp4.Subnet4[0].Reservations = append(k.Dhcp4.Subnet4[0].Reservations, keaReservation{
-			HWAddress: l.MAC,
-			IPAddress: l.IP,
-			Hostname:  l.Hostname,
-		})
+	id := 1
+	for _, d := range cfg.DHCP {
+		if !d.Enabled {
+			continue
+		}
+		ifc, ok := byName[d.Interface]
+		if !ok {
+			return "", fmt.Errorf("kea: dhcp server references unknown interface %q", d.Interface)
+		}
+		if ifc.IPv4 == "" {
+			return "", fmt.Errorf("kea: interface %q needs a static address", d.Interface)
+		}
+		ifcIP, ifcNet, err := net.ParseCIDR(ifc.IPv4)
+		if err != nil {
+			return "", fmt.Errorf("kea: %q address: %w", d.Interface, err)
+		}
+		k.Dhcp4.InterfacesConfig.Interfaces = append(k.Dhcp4.InterfacesConfig.Interfaces, ifc.Device)
+		sub := keaSubnet{
+			ID:            id,
+			Subnet:        ifcNet.String(),
+			Pools:         []keaPool{{Pool: d.RangeStart + " - " + d.RangeEnd}},
+			ValidLifetime: d.LeaseSeconds,
+			OptionData: []keaOption{
+				{Name: "routers", Data: ifcIP.String()},
+				{Name: "domain-name-servers", Data: ifcIP.String()},
+				{Name: "domain-name", Data: cfg.System.Domain},
+			},
+		}
+		for _, l := range d.StaticLeases {
+			sub.Reservations = append(sub.Reservations, keaReservation{
+				HWAddress: l.MAC,
+				IPAddress: l.IP,
+				Hostname:  l.Hostname,
+			})
+		}
+		k.Dhcp4.Subnet4 = append(k.Dhcp4.Subnet4, sub)
+		id++
 	}
 
 	out, err := json.MarshalIndent(k, "", "  ")

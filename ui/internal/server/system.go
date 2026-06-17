@@ -27,6 +27,89 @@ func (s *Server) routesSystem() {
 	s.mux.HandleFunc("POST /system/totp/disable", s.handleTOTPDisable)
 	s.mux.HandleFunc("POST /system/shell", s.handleShellToggle)
 	s.mux.HandleFunc("POST /system/smtp", s.handleSMTPSettings)
+	s.mux.HandleFunc("POST /system/time", s.handleSetTimezone)
+	s.mux.HandleFunc("POST /system/dns/servers", s.handleDNSServerAdd)
+	s.mux.HandleFunc("POST /system/dns/servers/delete", s.handleDNSServerDelete)
+	s.mux.HandleFunc("GET /system/dns/test", s.handleDNSTest)
+	s.mux.HandleFunc("POST /system/ntp/servers", s.handleNTPServerAdd)
+	s.mux.HandleFunc("POST /system/ntp/servers/delete", s.handleNTPServerDelete)
+	s.mux.HandleFunc("GET /system/ntp/test", s.handleNTPTest)
+}
+
+// handleSetTimezone stores the appliance's UTC offset (config.Timezones).
+func (s *Server) handleSetTimezone(w http.ResponseWriter, r *http.Request) {
+	tz := r.FormValue("timezone")
+	err := s.store.Update(func(c *config.Config) error {
+		c.System.Timezone = tz
+		return nil
+	})
+	redirect(w, r, "/system", err)
+}
+
+func (s *Server) handleDNSServerAdd(w http.ResponseWriter, r *http.Request) {
+	server := config.DNSServer{
+		Address:  strings.TrimSpace(r.FormValue("address")),
+		Hostname: strings.TrimSpace(r.FormValue("hostname")),
+	}
+	err := s.store.Update(func(c *config.Config) error {
+		c.System.DNSServers = append(c.System.DNSServers, server)
+		return nil
+	})
+	redirect(w, r, "/system", err)
+}
+
+func (s *Server) handleDNSServerDelete(w http.ResponseWriter, r *http.Request) {
+	addr := r.FormValue("address")
+	err := s.store.Update(func(c *config.Config) error {
+		for i, d := range c.System.DNSServers {
+			if d.Address == addr {
+				c.System.DNSServers = append(c.System.DNSServers[:i], c.System.DNSServers[i+1:]...)
+				return nil
+			}
+		}
+		return errors.New("dns server not found")
+	})
+	redirect(w, r, "/system", err)
+}
+
+func (s *Server) handleNTPServerAdd(w http.ResponseWriter, r *http.Request) {
+	server := strings.TrimSpace(r.FormValue("server"))
+	err := s.store.Update(func(c *config.Config) error {
+		c.System.NTPServers = append(c.System.NTPServers, server)
+		return nil
+	})
+	redirect(w, r, "/system", err)
+}
+
+func (s *Server) handleNTPServerDelete(w http.ResponseWriter, r *http.Request) {
+	server := r.FormValue("server")
+	err := s.store.Update(func(c *config.Config) error {
+		for i, n := range c.System.NTPServers {
+			if n == server {
+				c.System.NTPServers = append(c.System.NTPServers[:i], c.System.NTPServers[i+1:]...)
+				return nil
+			}
+		}
+		return errors.New("ntp server not found")
+	})
+	redirect(w, r, "/system", err)
+}
+
+// handleDNSTest probes an upstream resolver live and returns an HTML fragment
+// htmx swaps into the row. With a hostname it times a DNS-over-TLS handshake
+// (and verifies the cert); otherwise it times a plain UDP query round trip.
+func (s *Server) handleDNSTest(w http.ResponseWriter, r *http.Request) {
+	address := strings.TrimSpace(r.URL.Query().Get("address"))
+	hostname := strings.TrimSpace(r.URL.Query().Get("hostname"))
+	d, note, err := probeDNS(address, hostname)
+	writeProbeResult(w, d, note, err)
+}
+
+// handleNTPTest times an SNTP request/response round trip to the time source.
+func (s *Server) handleNTPTest(w http.ResponseWriter, r *http.Request) {
+	server := strings.TrimSpace(r.URL.Query().Get("server"))
+	d, err := probeNTP(server)
+	writeProbeResult(w, d, "", err)
 }
 
 // handleSMTPSettings saves the outbound mail relay. It lives on the System page
