@@ -45,35 +45,6 @@
   <button type="submit">Add</button>
 </form>
 
-<h2>WAN DNS servers</h2>
-<p class="muted">Upstream resolvers the appliance forwards to. An optional hostname turns on DNS-over-TLS and is the name verified against the server's certificate.</p>
-<table>
-  <thead><tr><th>Address</th><th>TLS hostname</th><th>Latency</th><th></th></tr></thead>
-  <tbody>
-    {{range $i, $d := .Cfg.System.DNSServers}}
-    <tr>
-      <td class="mono">{{$d.Address}}</td>
-      <td class="mono">{{if $d.Hostname}}{{$d.Hostname}}{{else}}<span class="muted">—</span>{{end}}</td>
-      <td><span id="dnstest-{{$i}}" class="muted">—</span></td>
-      <td class="actions">
-        <button type="button" class="secondary"
-                hx-get="/system/dns/test?address={{urlquery $d.Address}}&amp;hostname={{urlquery $d.Hostname}}"
-                hx-target="#dnstest-{{$i}}" hx-swap="innerHTML">Test</button>
-        <form method="post" action="/system/dns/servers/delete">
-          <input type="hidden" name="address" value="{{$d.Address}}">
-          <button type="submit" class="danger">Remove</button>
-        </form>
-      </td>
-    </tr>
-    {{end}}
-  </tbody>
-</table>
-<form method="post" action="/system/dns/servers" class="row-form">
-  <label>Address <input name="address" placeholder="1.1.1.1" required></label>
-  <label>TLS hostname <input name="hostname" placeholder="cloudflare-dns.com (optional)" size="22"></label>
-  <button type="submit">Add</button>
-</form>
-
 <h2>Apply</h2>
 {{if not .ApplyPending}}
 <form method="post" action="/system/apply">
@@ -83,37 +54,6 @@
 {{end}}
 <p><a href="/system/pf.conf" class="button-link">Preview generated pf.conf</a>
    <span class="muted">— rendered live from the current config.</span></p>
-<h2>Interfaces</h2>
-<table>
-  <thead><tr><th>Name</th><th>Role</th><th>Device</th><th>Address</th><th></th></tr></thead>
-  <tbody>
-    {{range .Cfg.Interfaces}}
-    {{if eq .Name $.EditID}}
-    <tr>
-      <td colspan="5">
-        <form method="post" action="/system/interfaces/{{.Name}}" class="row-form">
-          <strong>{{.Name}}</strong>
-          <input name="device" value="{{.Device}}" size="8" placeholder="igc0" required>
-          <select name="mode">
-            <option value="static" {{if not .DHCPClient}}selected{{end}}>static</option>
-            <option value="dhcp" {{if .DHCPClient}}selected{{end}}>dhcp</option>
-          </select>
-          <input name="ipv4" value="{{.IPv4}}" size="18" placeholder="192.168.1.1/24">
-          <button type="submit">Save</button>
-          <a href="/system" class="button-link">Cancel</a>
-        </form>
-      </td>
-    </tr>
-    {{else}}
-    <tr>
-      <td>{{.Name}}</td><td>{{.Role}}</td><td>{{.Device}}</td>
-      <td>{{if .DHCPClient}}dhcp{{else}}{{.IPv4}}{{end}}</td>
-      <td class="actions"><a href="/system?edit={{.Name}}" class="button-link">Edit</a></td>
-    </tr>
-    {{end}}
-    {{end}}
-  </tbody>
-</table>
 <h2>Backup &amp; restore</h2>
 <p>
   <a href="/system/backup" class="button-link">Download backup</a>

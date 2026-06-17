@@ -10,10 +10,10 @@ import (
 )
 
 func (s *Server) routesDHCP() {
-	s.mux.HandleFunc("POST /dhcp/{iface}/settings", s.handleDHCPSettings)
-	s.mux.HandleFunc("POST /dhcp/{iface}/leases", s.handleLeaseCreate)
-	s.mux.HandleFunc("POST /dhcp/{iface}/leases/{mac}", s.handleLeaseUpdate)
-	s.mux.HandleFunc("POST /dhcp/{iface}/leases/{mac}/delete", s.handleLeaseDelete)
+	s.mux.HandleFunc("POST /interfaces/{iface}/dhcp", s.handleDHCPSettings)
+	s.mux.HandleFunc("POST /interfaces/{iface}/leases", s.handleLeaseCreate)
+	s.mux.HandleFunc("POST /interfaces/{iface}/leases/{mac}", s.handleLeaseUpdate)
+	s.mux.HandleFunc("POST /interfaces/{iface}/leases/{mac}/delete", s.handleLeaseDelete)
 }
 
 // updateDHCP builds a Store.Update mutation against one interface's DHCP
@@ -38,7 +38,7 @@ func (s *Server) handleDHCPSettings(w http.ResponseWriter, r *http.Request) {
 	iface := r.PathValue("iface")
 	lease, err := strconv.Atoi(r.FormValue("lease_seconds"))
 	if err != nil {
-		redirect(w, r, "/dhcp", errors.New("lease must be a number of seconds"))
+		redirect(w, r, "/interfaces", errors.New("lease must be a number of seconds"))
 		return
 	}
 	enabled := r.FormValue("enabled") == "on"
@@ -48,7 +48,7 @@ func (s *Server) handleDHCPSettings(w http.ResponseWriter, r *http.Request) {
 		d.RangeEnd = strings.TrimSpace(r.FormValue("range_end"))
 		d.LeaseSeconds = lease
 	}))
-	redirect(w, r, "/dhcp", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 func parseLease(r *http.Request) config.StaticLease {
@@ -65,7 +65,7 @@ func (s *Server) handleLeaseCreate(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Update(updateDHCP(iface, func(d *config.DHCPServer) {
 		d.StaticLeases = append(d.StaticLeases, lease)
 	}))
-	redirect(w, r, "/dhcp", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 func (s *Server) handleLeaseUpdate(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +80,7 @@ func (s *Server) handleLeaseUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		return errors.New("static lease not found")
 	}))
-	redirect(w, r, "/dhcp", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 func (s *Server) handleLeaseDelete(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +94,7 @@ func (s *Server) handleLeaseDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return errors.New("static lease not found")
 	}))
-	redirect(w, r, "/dhcp", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 // forDHCP runs fn against an existing DHCP server, erroring if the interface

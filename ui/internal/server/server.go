@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,7 +41,7 @@ var pages = []Page{
 	{Path: "/", Title: "Dashboard", tmpl: "dashboard.html"},
 	{Path: "/services", Title: "Services", tmpl: "services.html"},
 	{Path: "/nat", Title: "NAT", tmpl: "nat.html"},
-	{Path: "/dhcp", Title: "DHCP", tmpl: "dhcp.html"},
+	{Path: "/interfaces", Title: "Interfaces", tmpl: "interfaces.html"},
 	{Path: "/dns", Title: "DNS", tmpl: "dns.html"},
 	{Path: "/wireguard", Title: "WireGuard", tmpl: "wireguard.html"},
 	{Path: "/logs", Title: "Logs", tmpl: "logs.html"},
@@ -186,7 +187,7 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStor
 	s.mux.HandleFunc("GET /api/traffic", s.handleTrafficAPI)
 	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
-	s.mux.HandleFunc("POST /system/interfaces/{name}", s.handleInterfaceUpdate)
+	s.mux.HandleFunc("POST /interfaces/{name}/address", s.handleInterfaceAddress)
 	s.mux.HandleFunc("POST /system/apply", s.handleApply)
 	s.mux.HandleFunc("POST /system/apply/confirm", s.handleApplyConfirm)
 	s.mux.HandleFunc("POST /system/apply/rollback", s.handleApplyRollback)
@@ -443,10 +444,17 @@ func (s *Server) handleLogsPartial(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) render(w http.ResponseWriter, r *http.Request, p Page) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpls[p.Path].Execute(w, s.data(p, r)); err != nil {
+	// Render into a buffer first: a template execution error mid-page would
+	// otherwise leave a 200 with truncated HTML (a silent, hard-to-spot bug).
+	// Buffering lets us fail with a 500 instead, which tests can catch.
+	var buf bytes.Buffer
+	if err := s.tmpls[p.Path].Execute(&buf, s.data(p, r)); err != nil {
 		log.Printf("render %s: %v", p.Path, err)
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
 }
 
 // redirect sends the post-action redirect, carrying any error as a flash
@@ -581,10 +589,12 @@ func updateForward(id string, fn func(*config.PortForward)) func(*config.Config)
 	}
 }
 
-// handleInterfaceUpdate edits one interface's device and addressing. Role
-// assignments are fixed at three (wan/lan/opt); only the mapping to hardware
-// and the address change here.
-func (s *Server) handleInterfaceUpdate(w http.ResponseWriter, r *http.Request) {
+// handleInterfaceAddress edits one interface's device and addressing on the
+// Interfaces page. Role assignments are fixed at three (wan/lan/opt); only the
+// hardware mapping and address change here. Non-WAN forms omit the mode
+// selector, so an absent "mode" means static — the only valid choice for an
+// interface that hosts a DHCP server.
+func (s *Server) handleInterfaceAddress(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	err := s.store.Update(func(c *config.Config) error {
 		for i := range c.Interfaces {
@@ -601,7 +611,7 @@ func (s *Server) handleInterfaceUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		return fmt.Errorf("interface %s not found", name)
 	})
-	redirect(w, r, "/system", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 // handleSetHostname is the first full vertical slice through the config

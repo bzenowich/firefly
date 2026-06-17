@@ -55,7 +55,7 @@ func (s *Server) handleDNSServerAdd(w http.ResponseWriter, r *http.Request) {
 		c.System.DNSServers = append(c.System.DNSServers, server)
 		return nil
 	})
-	redirect(w, r, "/system", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 func (s *Server) handleDNSServerDelete(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +69,7 @@ func (s *Server) handleDNSServerDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return errors.New("dns server not found")
 	})
-	redirect(w, r, "/system", err)
+	redirect(w, r, "/interfaces", err)
 }
 
 func (s *Server) handleNTPServerAdd(w http.ResponseWriter, r *http.Request) {
