@@ -227,6 +227,127 @@ full east-west (wired VLANs, WiFi isolation) is gated on owning the L2 edge and 
 positioned as a "bring a managed switch / use a recommended AP" integration — not a
 hardware bundle (§13), and not promised on arbitrary gear.
 
+**Build vs. integrate — the Go/C split.** Guiding principle: **Go owns the control
+plane; the C engines own the data plane.** Line-rate packet matching in a GC'd language
+is the wrong tool, and the protocol/signature corpora (nDPI, Suricata rules) are
+constantly-moving targets that would be madness to re-author. So the engines run as
+**separate processes** and Go orchestrates them and parses their output (JSON / flow
+records) — never statically linked in, never reimplemented:
+
+| Component | What it is | Reimplement in Go? | Dependency if not |
+|---|---|---|---|
+| NetFlow/IPFIX **collector** | Parse flow records off UDP → SQLite | **Yes — easy, drops a dep** (goflow2 = reference) | — |
+| NetFlow/IPFIX **export** | Generate flow records from traffic | **No** — stays in the packet path | kernel `pflow(4)` (FreeBSD base, reads the pf state table, zero userland) or softflowd |
+| **nDPI** | 300+ protocol DPI dissectors (C lib) | **No, never** — years of work, perpetual protocol churn | `libnDPI` (LGPL) |
+| **Suricata** | IDS/IPS engine, SIMD + Hyperscan, multi-thread | **No** — hyper-optimized line-rate matcher + whole rule ecosystem | `suricata` (GPLv2) + ruleset feed (ET Open free / ET Pro paid) + Hyperscan (Intel x86 — our SoC, good) + libpcap/netmap |
+| **ntopng** | Full traffic-monitor *app* (C++), own UI + DB | **No** (it's a whole app) — and **demote it** (below) | `ntopng` (GPLv3) + **Redis (mandatory backing store)** + nDPI + libpcap |
+
+**Go therefore implements:** the **IPFIX collector** (flow records → SQLite); **alert
+ingestion** (Suricata `eve.json` → SQLite ring buffer → UI + the §8.5 LLM feed);
+**config generation** for every engine (`suricata.yaml`, ntopng cfg, `pflow` setup) via
+the same declarative engine as pf/unbound (§7); the **Traffic Graph + flow UI** (uPlot,
+§7); and **engine supervision** (start/stop/health). Go does **not** implement nDPI
+dissectors, the Suricata engine, ntopng's forensic app, or packet-path flow export.
+
+**Two gotchas that drive the tiering.** (1) **Redis** — ntopng *requires* it, an extra
+always-on service competing for RAM on the 8 GB box (and with the §8.5 LLM). (2)
+**Licensing** — Suricata GPLv2, ntopng GPLv3, nDPI LGPL are all fine as **separate
+processes/packages** (mere aggregation, exactly as we already ship pf/unbound), but
+**none may be static-linked into the Go binary**; in particular keep nDPI behind a
+**separate helper process**, not cgo, to avoid pulling LGPL into the binary.
+
+**Tiering (resolves where each engine lives):**
+
+- **Baseline — ships in the base image, Go + kernel where possible.** Kernel `pflow(4)`
+  export → **Go IPFIX collector** → SQLite → our UI. App-layer identification (which §8
+  promises at baseline) comes from a **small nDPI helper process** that links `libnDPI`,
+  classifies flows, and emits enriched records to the Go collector over a socket — this
+  keeps app-ID baseline **without dragging in ntopng or Redis.** Base appliance =
+  Go binary + kernel + one tiny nDPI helper: no Redis, no GPLv3 app, no IDS overhead.
+- **Power tier — optional packages, off by default.** **ntopng + Redis** for the deep
+  forensic deep-dive (the power-user role §8 already describes). **Suricata** for
+  IDS/IPS — this is the detector stack the §8.5 LLM triage layer consumes; it is *not*
+  in the base image and must be opted into.
+
+## 8.5 AI assist layer (Phase 0.5) — local LLM for triage, explanation & NL interface
+
+A small on-box LLM is a **human-facing layer on top of** the §8 visibility stack, never
+a packet inspector. The architecture is deliberately split-brain: **dumb-fast detectors
+do security at line rate; a slow-smart LLM does the human interface.** Optional,
+off by default, fully local — it fits the no-cloud pillar and is a real prosumer
+differentiator (a firewall that *explains itself*).
+
+**The hard constraint — physics, not engineering.** A gateway sees millions of
+packets/sec and gigabits/sec; a 2 B-param model on these cores does ~5–15 tokens/sec —
+a 6+ order-of-magnitude gap. The LLM therefore **never touches the fast path**: no
+inline DPI, no per-packet IDS, no malware byte-scanning. That work stays with the right
+tools — the baseline nDPI flow path plus the opt-in power-tier detectors of §8:
+
+| Job | Tool | Speed |
+|---|---|---|
+| Signature IDS/IPS | Suricata (FreeBSD pkg) | line-rate |
+| App-layer DPI / flow classify | nDPI + ntopng (§8) | line-rate |
+| Malware byte signatures | YARA (on flagged artifacts only) | fast |
+| Flow anomaly detection | **small classical ML** (gradient-boost / isolation-forest on NetFlow features) — KB-size model, µs inference, *not* an LLM | line-rate |
+
+The LLM consumes only the **low-volume, already-flagged output** of those detectors,
+on-demand or in batch (seconds-to-minutes latency is fine).
+
+**What the LLM does (all async, human-facing):**
+
+- **Alert triage & summarize** — cluster/rank an overnight Suricata+ntopng alert pile
+  into plain English: *"3 LAN hosts beaconing to one C2; likely a single infection on
+  .14."*
+- **Explain alerts** — translate cryptic signature IDs into what/why/risk for a
+  non-expert. Big UX win for a sellable product.
+- **NL query over flow data** — *"what did the TV talk to yesterday?"* → structured
+  query over the ntopng/flow DB, results rendered in the existing UI.
+- **Config assistant** — natural language → a proposed `/conf/config.json` change,
+  validated through the normal engine (`pfctl -nf`, 60 s auto-rollback — §7). LLM only
+  *drafts*; the deterministic engine remains the source of truth and the safety gate.
+- **Incident report draft** — correlate flagged events into a readable writeup for
+  export/email.
+
+**Hardware budget (the gating reality).** CPU-only — no GPU, no usable NPU. Gracemont
+has AVX2 + AVX-VNNI, which helps int8/Q4 inference via `llama.cpp`, but the box is
+RAM- and thermal-bound:
+
+- **Model:** target **Gemma 3n E2B** (≈2 B effective params; Q4 ≈ 2–3 GB resident).
+  Alternates if quality is short: Qwen2.5-3B-Instruct, Phi-3.5-mini. Evaluate on *real*
+  alert data before committing — 2 B models are weak at multi-step correlation.
+- **Runtime:** `llama.cpp` (FreeBSD-buildable, single static-ish binary, no Python),
+  loaded lazily; unload after idle to reclaim RAM.
+- **RAM:** 2–3 GB of the 8 GB base is shared with the OS, ntopng, and the flow DB —
+  tight. **A 16 GB RAM option becomes the recommended SKU if the LLM ships** (see §2;
+  the soldered-DDR4 design must leave the stuffing option open). Never swap a model to
+  NVMe — latency death.
+- **Contention & thermal:** inference pegs all 4 cores and blows the 6 W fanless budget,
+  so it is **burst-only**: hard-capped to 1–2 threads, `nice`/`rctl`-limited, and gated
+  to run only when WAN is idle or on explicit user request. **Routing/NAT must never be
+  starved by the assistant** — this is a hard invariant, not a tuning goal.
+
+**Why not let the LLM detect?** It hallucinates, it's six orders of magnitude too slow,
+and it has no ground truth on raw bytes. Detection is line-rate pattern-matching — a
+solved problem for the tools above. The LLM's value is *interpretation*, not detection.
+
+**Implementation boundary (per the §8 Go/C split).** The assist layer is **all Go**: it
+consumes the artifacts the detectors already produce — Suricata `eve.json` and the flow
+SQLite — and adds the LLM glue (prompt assembly, `llama.cpp` invocation, NL-query →
+structured-query translation, draft-config generation through the §7 engine). It does
+**not** parse packets or embed any detector; richer alerts simply require the §8
+power-tier (Suricata) to be opted in.
+
+**Phasing.** Strictly software, and gated behind the detectors that feed it: the
+**baseline nDPI flow path** covers NL flow queries out of the box, while **alert triage
+and explanation require the §8 power tier (Suricata) opted in**. Ships as an **optional,
+off-by-default** feature so the base appliance carries no LLM cost or attack surface.
+Positioned as **Phase 0.5** — after the visibility baseline, before any firmware/PCB work.
+
+**Open questions for this layer:** (1) bundle a model in the image (size, license,
+update cadence) vs. an opt-in download? (2) is E2B good enough, or does the floor model
+have to be 3 B (→ 16 GB SKU mandatory)? (3) does the config-assistant write path stay
+*draft-only* forever (safest) or ever auto-apply behind confirmation? Lean draft-only.
+
 ## 9. Certification, manufacturing, supply (sellable product)
 
 - **Regulatory (no radio in v1 keeps this sane):**
@@ -271,6 +392,7 @@ hardware bundle (§13), and not promised on arbitrary gear.
 | Phase | Deliverable | Duration (solo, est.) |
 |-------|-------------|----------------------|
 | **0 — Software first** | Full OS image + WebUI running on a COTS ADL-N / i226 box (e.g. a Protectli VP24xx or CWWK N100 unit). All 9 UI feature areas working, **as a mobile-first responsive PWA** (passkey login, WG-tunnel remote access — §7). **Network visibility baseline:** NetFlow/IPFIX + nDPI with ntopng integrated on-box (§8). This is the product's value; hardware can lag. | 3–4 months |
+| **0.5 — AI assist (optional)** | Off-by-default local LLM assist layer on top of the Phase 0 detector stack (Suricata + nDPI/ntopng): alert triage/summarize, alert explanation, NL flow queries, draft-only config assistant. `llama.cpp` + a 2–3 B model, burst-only, routing never starved. 16 GB RAM SKU if committed. **Software only — see §8.5.** | 1–2 months |
 | **1 — Firmware** | coreboot + EDK2 payload booting the Phase 0 image on reference ADL-N hardware (Dasharo-supported box ideal), serial console end-to-end | 1–2 months |
 | **2 — Carrier board** | SMARC/COMe-Mini carrier in KiCad: NICs, power, console, M.2. 5 protos assembled, OS + coreboot running on own hardware | 3 months |
 | **3 — Case & thermal** | Folded-aluminum enclosure, thermal soak validation at 40 °C ambient | 1–2 months (overlaps 2) |
