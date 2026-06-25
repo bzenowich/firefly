@@ -10,38 +10,52 @@ published design files. Branding rationale + positioning in `docs/marketing.md`.
 | Area | Decision | Rationale |
 |------|----------|-----------|
 | SoC | **Value SKU:** Intel Processor N150 (Twin Lake / ADL-N) | 4 Gracemont cores @ 3.6 GHz, 6 W base TDP, 9 PCIe 3.0 lanes, AES-NI/VAES, public Intel FSP enables coreboot, strong FreeBSD support, best $/perf for a 3-port box |
-| SoC | **Embedded SKU:** Intel Atom C1110 (Arizona Beach) | Same 4× Gracemont cores, but networking-grade: ~10-yr embedded availability, **real LPDDR5 ECC**, PCIe **Gen4** (~20 lanes), 13 W. Proven in the Netgate 4200 (C1110 + 4× i226, 3.2 Gbps IPsec). **Separate board** — not pin-compatible with N150 (different package, LPDDR5). coreboot support **unverified** — gating risk |
+| SoC | **Embedded SKU:** Intel Atom x7425E (Alder Lake-N embedded) | Same ADL-N silicon as N150 — **true drop-in on the same board** (same FCBGA, DDR4/DDR5 + In-Band ECC, 9 PCIe 3.0 lanes, same proven coreboot path). Adds **Intel IoT ~10–15-yr availability** + industrial temp grade for the long-support tier. 12 W (thermal worst case). One PCB, one firmware image. q100 price opaque — confirm before locking |
 | NICs | 3× Intel i226-IT (2.5GbE) | Industrial temp, one PCIe 3.0 lane each, mature FreeBSD `igc(4)` driver, auto-negotiates down to 1000baseT |
 | WebUI | Go + htmx, single static binary | No runtime deps, trivial FreeBSD cross-compile, server-rendered with live updates, small attack surface, maintainable solo |
 | Goal | Sellable product | Plan includes certification, manufacturing, and supply-chain sections |
 
-**SoC SKU strategy — two-tier, both Gracemont:**
+**SoC SKU strategy — two-tier, one board, all ADL-N Gracemont:**
 
 - **Value SKU — Intel Processor N150** (Twin Lake, 4× Gracemont @ 3.6 GHz, 6 W base,
-  9 PCIe 3.0 lanes). Current silicon (Q1 2025), cheapest, highest clock, best-supported
-  coreboot path (ADL-N / Dasharo / Nissa). **N100** is the drop-in fallback (3.4 GHz,
-  ~same price) if N150 stock lags. Memory: soldered DDR4 with In-Band ECC only.
-- **Embedded SKU — Intel Atom C1110** (Arizona Beach, Q2 2022). *Same Gracemont cores*
-  as N150 but purpose-built for networking: ~10-yr embedded availability, **real
-  LPDDR5-5200 ECC**, **PCIe Gen4** (1×16+4 or 2×8+4, ~20 lanes), 13 W, VAES crypto
-  (no QAT). Lower base clock (2.1 GHz) — irrelevant for I/O-bound firewall work; the
-  Netgate 4200 (C1110 + 4× i226-IT) does 3.2 Gbps IPsec on pfSense, validating this
-  exact architecture. **Not a drop-in for the N150 board** (different package, LPDDR5
-  vs DDR4) — it needs its own PCB layout.
+  9 PCIe 3.0 lanes). Current silicon (Q1 2025), cheapest, highest clock, lowest thermal,
+  best-supported coreboot path (ADL-N / Dasharo / Nissa). **N100** is the drop-in
+  fallback (3.4 GHz, ~same price) if N150 stock lags. Memory: soldered DDR4 with In-Band
+  ECC only.
+- **Embedded SKU — Intel Atom x7425E** (Alder Lake-N embedded, Q1 2023). *Same ADL-N
+  silicon* as N150 and a **true drop-in on the same PCB** — same FCBGA package, same
+  DDR4/DDR5 + In-Band ECC, same 9 PCIe 3.0 lanes, same coreboot image. What it buys over
+  N150: **Intel IoT long-life availability (~10–15 yr)** and **industrial temperature
+  grade** — the supply-continuity + spec story for a sellable, long-supported appliance
+  (directly addresses §9 supply and risk #3). Costs vs N150: ~12 W (the §5 thermal worst
+  case), opaque embedded pricing (higher than N150's ~$45), and a slightly lower 3.4 GHz
+  turbo (irrelevant for I/O-bound routing). Higher-end future option in the same family:
+  Atom x7835RE "Amston Lake" (8 cores) if a premium SKU ever wants more compute.
 
-**Two gating unknowns to confirm before committing C1110:** (1) does a **coreboot port
-exist** for Arizona Beach? Netgate ships its own BIOS, so this may be a from-scratch
-bring-up — a serious risk to the open-firmware pillar. (2) **C1110 price at qty 100**
-(embedded pricing, no public figure). If coreboot is a dead end, the embedded path
-falls back to the **Atom x7425E** (true drop-in for the N150 ADL-N board, In-Band ECC,
-12 W) instead. Higher-end future option: Atom x7000RE "Amston Lake" (up to 8 cores).
-Confirm distributor stock (Mouser/Arrow) before locking any SKU.
+**Why one board, not two.** N150 and x7425E share package, memory interface, lane count,
+and firmware, so a single PCB layout carries both — stuff N150 for the value SKU, x7425E
+for the embedded SKU. No second board, no second coreboot bring-up, no second SI review.
+This is the embedded-tier story the plan originally chased with the **Atom C1110**
+(Arizona Beach), now demoted — see below.
+
+**C1110 demoted to research-pending-FSP (was the embedded SKU).** C1110 offered real
+LPDDR5-5200 ECC + PCIe Gen4 and is proven in the Netgate 4200 (3.2 Gbps IPsec), but a
+2026-06-24 coreboot-feasibility review found: **no coreboot port exists** (zero refs in
+the coreboot tree/gerrit; Netgate ships closed AMI BIOS) and — the fatal item — **no
+evidence of a public Intel FSP** for Arizona Beach (absent from coreboot vendorcode,
+unlike Denverton-NS / Snow Ridge of the same era; ~75% confidence it is NDA-gated).
+Without a public FSP a coreboot port is *impossible*, not merely hard — this fails the
+open-firmware pillar. C1110 also needed its own PCB (different package, LPDDR5) and a
+from-scratch firmware bring-up. It stays parked unless a direct query to the **Intel FSP
+Program Office** confirms a public FSP; the LPDDR5-ECC/Gen4 advantages don't matter at
+3× 2.5GbE anyway. Confirm distributor stock (Mouser/Arrow) before locking any SKU.
 
 ## 2. Hardware specification (target)
 
-- **SoC:** two-tier, both 4× Gracemont — **N150** (value, 6 W, DDR4, drop-in N100
-  fallback) and **Atom C1110** (embedded, 13 W, LPDDR5 ECC, Gen4; separate board).
-  See §1 for the full SKU strategy and the C1110 coreboot/price gating items.
+- **SoC:** two-tier on **one board**, all ADL-N 4× Gracemont — **N150** (value, 6 W,
+  DDR4, drop-in N100 fallback) and **Atom x7425E** (embedded, 12 W, ~10–15-yr life +
+  industrial temp; true drop-in on the same PCB). See §1 for the full SKU strategy;
+  C1110 is demoted (no public coreboot FSP — §1, risk #7).
 - **Memory:** 8 GB soldered DDR4-3200 (single channel, 4× x16 chips). In-Band ECC
   enabled where the SKU/firmware supports it. Soldered like the APU2 — no SODIMM to
   work loose, better vibration/thermal profile.
@@ -110,7 +124,7 @@ Confirm distributor stock (Mouser/Arrow) before locking any SKU.
 - N150 base is 6 W — same ballpark as the GX-412TC, so fanless is well within reach.
   Boost/cTDP-up can pull ~15–25 W in short bursts: validate with a worst-case soak
   test (all ports saturated + WireGuard) at 40 °C ambient; add base-plate fins or pin
-  cTDP if needed. (The x7425E embedded alternate runs 12 W and is the thermal worst case.)
+  cTDP if needed. (The x7425E embedded SKU runs 12 W and is the thermal worst case to design the heat-spreader against.)
 - **CAD:** case modeled in FreeCAD/OnShape from the KiCad STEP export; DXF flat
   patterns for the sheet-metal shop
 - Front panel: 3× RJ45, 2× USB-A, USB-C console, DB9, power LED / activity LEDs.
@@ -431,10 +445,12 @@ firewall/
 5. **Thermal at 12 W fanless** — validate in Phase 3; cTDP-down to 6 W is the escape
    hatch
 6. **Certification failure on rev B** — pre-scan early, keep a respin in the budget
-7. **C1110 coreboot bring-up** (embedded SKU only) — Arizona Beach has no proven
-   coreboot port; Netgate ships closed BIOS. Confirm feasibility before committing the
-   embedded board; **x7425E is the drop-in fallback** if it's a dead end. Does not
-   affect the N150 value SKU (ADL-N coreboot is solid).
+7. **Embedded-SKU supply continuity** — *resolved by SKU choice.* The embedded tier is
+   now **x7425E**, same ADL-N coreboot path as N150, so no firmware risk. C1110 was
+   demoted after a 2026-06-24 review found no coreboot port and no public Intel FSP for
+   Arizona Beach (likely NDA-gated → open firmware impossible). C1110 only revives if the
+   Intel FSP Program Office confirms a public FSP. Residual item: confirm x7425E qty-100
+   price + Mouser/Arrow stock (embedded pricing is opaque and could pinch the BOM).
 
 ## 13. Open questions
 
@@ -446,11 +462,12 @@ firewall/
   spare/redirect. Still TODO: **formal TM clearance** on both names, classes 9 + 42 +
   hardware (have counsel weigh the Gateron "Luciola" keyboard-switch line — different
   goods, likely fine). See `docs/marketing.md`.
-- SoC tiers: **N150** value vs **C1110** embedded (both Gracemont). Two blockers on
-  C1110 before it's real — **(1) coreboot port for Arizona Beach exists?** (may be
-  from-scratch; risks the open-firmware pillar) and **(2) qty-100 price?** If coreboot
-  is a dead end, fall back to **x7425E** (drop-in for the N150 board). Confirm
-  distributor stock before locking.
+- ~~SoC tiers: N150 value vs C1110 embedded~~ **DECIDED:** two-tier on one board,
+  **N150** value + **x7425E** embedded (both ADL-N, x7425E drops onto the N150 PCB).
+  **C1110 demoted** — 2026-06-24 review found no coreboot port and no public Intel FSP
+  for Arizona Beach (§1, risk #7). Remaining: **confirm x7425E qty-100 price + Mouser/
+  Arrow stock** before locking. Optional: a direct query to the Intel FSP Program Office
+  to settle the C1110 FSP question with certainty (currently ~75% NDA-gated).
 - Retail price point: $199 stretch (needs qty 1000+) vs $249–299 realistic at launch
 - SMARC vs COM Express Mini for the Phase 2 module (pick by module vendor's ADL-N
   offering and long-life commitment — Kontron, Advantech, congatec all ship ADL-N SMARC)
