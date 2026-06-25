@@ -449,8 +449,11 @@ firewall/
    now **x7425E**, same ADL-N coreboot path as N150, so no firmware risk. C1110 was
    demoted after a 2026-06-24 review found no coreboot port and no public Intel FSP for
    Arizona Beach (likely NDA-gated → open firmware impossible). C1110 only revives if the
-   Intel FSP Program Office confirms a public FSP. Residual item: confirm x7425E qty-100
-   price + Mouser/Arrow stock (embedded pricing is opaque and could pinch the BOM).
+   Intel FSP Program Office confirms a public FSP. Residual item: x7425E is **design-in
+   only** — not stocked at Mouser/Digi-Key/Arrow/Avnet (confirmed 2026-06-24); Intel RCP
+   is **$58 @ 1k** (MM# 99C822), ~$13 over the N150 line. Qty-100 pricing comes through
+   the **Intel IoT design-in channel / CM**, not catalog distribution — open that account
+   early (ties to the §3 Intel Partner Alliance signup).
 
 ## 13. Open questions
 
@@ -465,9 +468,11 @@ firewall/
 - ~~SoC tiers: N150 value vs C1110 embedded~~ **DECIDED:** two-tier on one board,
   **N150** value + **x7425E** embedded (both ADL-N, x7425E drops onto the N150 PCB).
   **C1110 demoted** — 2026-06-24 review found no coreboot port and no public Intel FSP
-  for Arizona Beach (§1, risk #7). Remaining: **confirm x7425E qty-100 price + Mouser/
-  Arrow stock** before locking. Optional: a direct query to the Intel FSP Program Office
-  to settle the C1110 FSP question with certainty (currently ~75% NDA-gated).
+  for Arizona Beach (§1, risk #7). Remaining: x7425E is **design-in only** (not at
+  Mouser/Digi-Key/Arrow/Avnet, confirmed 2026-06-24; Intel RCP $58 @ 1k, MM# 99C822) —
+  get qty-100 pricing via the **Intel IoT design-in channel / CM**, not catalog. Optional:
+  a direct query to the Intel FSP Program Office to settle the C1110 FSP question with
+  certainty (currently ~75% NDA-gated).
 - Retail price point: $199 stretch (needs qty 1000+) vs $249–299 realistic at launch
 - SMARC vs COM Express Mini for the Phase 2 module (pick by module vendor's ADL-N
   offering and long-life commitment — Kontron, Advantech, congatec all ship ADL-N SMARC)
