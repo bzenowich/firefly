@@ -31,6 +31,7 @@ type Collector struct {
 	store *Store
 	dec   *Decoder
 	addr  string
+	cache *LabelCache // app labels from the ndpi-helper; nil disables enrichment
 }
 
 func NewCollector(store *Store, addr string) *Collector {
@@ -38,6 +39,13 @@ func NewCollector(store *Store, addr string) *Collector {
 		addr = DefaultAddr
 	}
 	return &Collector{store: store, dec: NewDecoder(), addr: addr}
+}
+
+// WithLabels enables app-layer enrichment: flows are stamped from cache at
+// insert (design §5, path 1). The same cache is fed by a LabelServer.
+func (c *Collector) WithLabels(cache *LabelCache) *Collector {
+	c.cache = cache
+	return c
 }
 
 // Run binds the UDP listener and serves until ctx is cancelled. It returns the
@@ -89,17 +97,25 @@ func (c *Collector) ingest(pkt []byte) {
 		log.Printf("flow: decode: %v", err)
 		return
 	}
+	now := time.Now()
 	out := recs[:0]
 	for _, r := range recs {
 		if !r.Src.IsValid() || !r.Dst.IsValid() {
 			continue
+		}
+		// Stamp the app label if the helper already classified this flow (the
+		// common ordering — classify at flow start, export at flow expiry).
+		if c.cache != nil {
+			if app, ok := c.cache.appFor(r, now); ok {
+				r.App = app
+			}
 		}
 		out = append(out, r)
 	}
 	if len(out) == 0 {
 		return
 	}
-	if err := c.store.Insert(time.Now(), out); err != nil {
+	if err := c.store.Insert(now, out); err != nil {
 		log.Printf("flow: insert: %v", err)
 	}
 }

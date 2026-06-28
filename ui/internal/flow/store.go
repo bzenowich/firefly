@@ -159,6 +159,26 @@ func (s *Store) Insert(t time.Time, recs []Record) error {
 	return tx.Commit()
 }
 
+// BackfillApp stamps an app label onto recent raw flows that were inserted
+// before the label arrived (design §5, path 2). It matches the flow in either
+// direction and only fills rows still NULL, bounded to the raw window so the
+// scan stays cheap. This corrects the flow-log view for the late-label race;
+// the common case (label before insert) is handled by stamp-at-insert instead.
+func (s *Store) BackfillApp(now time.Time, l Label) error {
+	since := now.Add(-rawRetention).Unix()
+	src, dst := l.Src.String(), l.Dst.String()
+	_, err := s.db.Exec(`
+		UPDATE flows SET app = ?
+		WHERE app IS NULL AND proto = ? AND ts > ? AND (
+			(src = ? AND sport = ? AND dst = ? AND dport = ?) OR
+			(src = ? AND sport = ? AND dst = ? AND dport = ?)
+		)`,
+		l.App, l.Proto, since,
+		src, l.SPort, dst, l.DPort,
+		dst, l.DPort, src, l.SPort)
+	return err
+}
+
 // Rollup folds every raw flow newer than the watermark into the host and app
 // rollups (both minute and hour buckets), advances the watermark, and trims the
 // rollups to rollRetention. Idempotent and safe to call on a timer: a flow at

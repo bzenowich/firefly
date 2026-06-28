@@ -11,10 +11,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -97,11 +99,30 @@ func main() {
 	}
 	defer flowStore.Close()
 	flowAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Flow.CollectorPort()))
+
+	// App-layer enrichment: the ndpi-helper streams {5-tuple → app} labels to
+	// the LabelServer over a unix socket; the collector stamps them onto flows
+	// at insert (docs/ndpi-helper-design.md). The socket lives next to the other
+	// state files so it is writable on dev and appliance alike.
+	labelCache := flow.NewLabelCache()
+	flowSocket := filepath.Join(dir, "fw-ndpi.sock")
 	go func() {
-		if err := flow.NewCollector(flowStore, flowAddr).Run(collectCtx); err != nil {
+		if err := flow.NewLabelServer(flowSocket, labelCache, flowStore).Run(collectCtx); err != nil {
+			log.Printf("flow label server: %v", err)
+		}
+	}()
+	go func() {
+		if err := flow.NewCollector(flowStore, flowAddr).WithLabels(labelCache).Run(collectCtx); err != nil {
 			log.Printf("flow collector: %v", err)
 		}
 	}()
+
+	// fwd owns the helper process. It links libnDPI/libpcap, so it runs only on
+	// the appliance and only while baseline flow is enabled; on a dev box the
+	// LabelServer still runs, so a stub helper can drive the pipeline.
+	if runtime.GOOS == "freebsd" && cfg.Flow.Enabled {
+		go superviseHelper(collectCtx, flowSocket, flowDevices(cfg))
+	}
 
 	srv, err := server.New(store, mgr, logStore, trafStore, flowStore)
 	if err != nil {
@@ -145,5 +166,47 @@ func main() {
 	defer cancel()
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
+	}
+}
+
+// flowDevices is the capture device list passed to the ndpi-helper: the device
+// names of the interfaces baseline flow monitors (all, by default).
+func flowDevices(cfg config.Config) []string {
+	var devs []string
+	for _, ifc := range cfg.Interfaces {
+		if ifc.Device != "" && cfg.Flow.IsMonitored(ifc.Name) {
+			devs = append(devs, ifc.Device)
+		}
+	}
+	return devs
+}
+
+// superviseHelper runs the ndpi-helper as a supervised child: start it, restart
+// with a short backoff if it exits, and stop it when ctx is cancelled. The
+// helper is found on PATH (installed by the OS image); if it is absent the
+// feature is simply skipped — app labels stay empty, the rest of visibility is
+// unaffected.
+func superviseHelper(ctx context.Context, socket string, devices []string) {
+	bin, err := exec.LookPath("ndpi-helper")
+	if err != nil {
+		log.Printf("flow: ndpi-helper not found on PATH; app labels disabled")
+		return
+	}
+	const backoff = 3 * time.Second
+	for ctx.Err() == nil {
+		args := []string{"-socket", socket}
+		if len(devices) > 0 {
+			args = append(args, "-devices", strings.Join(devices, ","))
+		}
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil && ctx.Err() == nil {
+			log.Printf("flow: ndpi-helper exited: %v; restarting in %s", err, backoff)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
 	}
 }
