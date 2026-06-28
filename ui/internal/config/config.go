@@ -29,6 +29,7 @@ type Config struct {
 	DHCP       []DHCPServer `json:"dhcp"`
 	DNS        DNS          `json:"dns"`
 	WireGuard  WireGuard    `json:"wireguard"`
+	Flow       Flow         `json:"flow"`
 	Visibility Visibility   `json:"visibility"`
 	Shell      Shell        `json:"shell"`
 	SMTP       SMTP         `json:"smtp"`
@@ -60,6 +61,52 @@ func (m SMTP) EffectivePort() int {
 		return 465
 	}
 	return 587
+}
+
+// Flow configures the baseline network-visibility pipeline (plan.md §8,
+// docs/visibility-design.md): the kernel's pflow(4) exporter ships the pf state
+// table as IPFIX to an in-process Go collector that summarizes flows into
+// SQLite for the native Flows view. This is the always-on, dependency-free
+// summary (no Redis, no ntopng, no C in the data path) — distinct from the
+// opt-in ntopng power tier below. On by default: pflow runs in the kernel with
+// no userland packet copy, so the cost is negligible.
+type Flow struct {
+	Enabled bool `json:"enabled"`
+	// Interfaces optionally narrows the per-interface breakdown to these
+	// interface Names. Empty means every configured interface. pflow exports
+	// the whole pf state table, so this is a collector-side filter, not a
+	// capture switch.
+	Interfaces []string `json:"interfaces,omitempty"`
+	// Port is the localhost UDP port the collector binds and pflow exports to.
+	// 0 => the FlowDefaultPort default.
+	Port int `json:"port,omitempty"`
+}
+
+// FlowDefaultPort is the localhost UDP port pflow exports to and the collector
+// binds when Flow.Port is unset. Matches flow.DefaultAddr.
+const FlowDefaultPort = 9996
+
+// CollectorPort returns the effective localhost UDP port (default
+// FlowDefaultPort).
+func (f Flow) CollectorPort() int {
+	if f.Port <= 0 {
+		return FlowDefaultPort
+	}
+	return f.Port
+}
+
+// IsMonitored reports whether the named interface is shown in the per-interface
+// breakdown. An empty Interfaces list means every interface.
+func (f Flow) IsMonitored(name string) bool {
+	if len(f.Interfaces) == 0 {
+		return true
+	}
+	for _, n := range f.Interfaces {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Visibility configures on-box network traffic analysis: ntopng with nDPI
@@ -395,7 +442,8 @@ func Default() Config {
 			RangeEnd:     "192.168.1.199",
 			LeaseSeconds: 7200,
 		}},
-		DNS: DNS{Enabled: true},
+		DNS:  DNS{Enabled: true},
+		Flow: Flow{Enabled: true}, // baseline visibility ships on; kernel-side, near-zero cost
 	}
 }
 
@@ -441,6 +489,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateVisibility(); err != nil {
+		return err
+	}
+	if err := c.validateFlow(); err != nil {
 		return err
 	}
 	if err := c.validateUsers(); err != nil {
@@ -678,6 +729,28 @@ func (c *Config) validateVisibility() error {
 		}
 		if seen[name] {
 			return fmt.Errorf("visibility: interface %q listed twice", name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+func (c *Config) validateFlow() error {
+	f := c.Flow
+	if f.Port != 0 && (f.Port < 1 || f.Port > 65535) {
+		return fmt.Errorf("flow: port must be 1-65535")
+	}
+	known := map[string]bool{}
+	for _, ifc := range c.Interfaces {
+		known[ifc.Name] = true
+	}
+	seen := map[string]bool{}
+	for _, name := range f.Interfaces {
+		if !known[name] {
+			return fmt.Errorf("flow: unknown interface %q", name)
+		}
+		if seen[name] {
+			return fmt.Errorf("flow: interface %q listed twice", name)
 		}
 		seen[name] = true
 	}

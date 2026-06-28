@@ -14,12 +14,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/cert"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
 	"firewall/ui/internal/server"
 	"firewall/ui/internal/traffic"
@@ -85,7 +87,23 @@ func main() {
 	defer trafStore.Close()
 	go traffic.NewSampler(trafStore).Run(collectCtx)
 
-	srv, err := server.New(store, mgr, logStore, trafStore)
+	// Baseline network visibility: the flow collector receives pflow's IPFIX
+	// export on localhost and summarizes flows into SQLite for the Visibility
+	// page. Pure Go + kernel; runs cross-platform like the traffic sampler,
+	// though only the FreeBSD appliance's pflow(4) actually exports to it.
+	flowStore, err := flow.Open(filepath.Join(dir, "fw-flows.db"))
+	if err != nil {
+		log.Fatalf("flow: %v", err)
+	}
+	defer flowStore.Close()
+	flowAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Flow.CollectorPort()))
+	go func() {
+		if err := flow.NewCollector(flowStore, flowAddr).Run(collectCtx); err != nil {
+			log.Printf("flow collector: %v", err)
+		}
+	}()
+
+	srv, err := server.New(store, mgr, logStore, trafStore, flowStore)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}

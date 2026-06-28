@@ -12,6 +12,7 @@ import (
 
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
 	"firewall/ui/internal/traffic"
 )
@@ -30,7 +31,7 @@ func newTestServer(t *testing.T) (*client, *config.Store) {
 		t.Fatal(err)
 	}
 	mgr := apply.New(apply.OSSystem{Root: filepath.Join(t.TempDir(), "root"), NoExec: true}, time.Minute)
-	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t))
+	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +58,16 @@ func newTestTrafficStore(t *testing.T) *traffic.Store {
 	}
 	t.Cleanup(func() { ts.Close() })
 	return ts
+}
+
+func newTestFlowStore(t *testing.T) *flow.Store {
+	t.Helper()
+	fs, err := flow.Open(filepath.Join(t.TempDir(), "flows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fs.Close() })
+	return fs
 }
 
 // setup runs first-run admin creation and returns the session cookie.
@@ -154,7 +165,7 @@ func TestFirstRunSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), newTestLogStore(t), newTestTrafficStore(t))
+	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +392,7 @@ func TestApplyWritesFiles(t *testing.T) {
 	}
 	root := filepath.Join(t.TempDir(), "root")
 	mgr := apply.New(apply.OSSystem{Root: root, NoExec: true}, 0)
-	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t))
+	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}

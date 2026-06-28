@@ -1,13 +1,66 @@
 {{define "content"}}
 <h1>Visibility</h1>
 <p class="muted">
-  Deep traffic analysis with ntopng and nDPI app-layer identification, on the
-  appliance's own interfaces. North-south and inter-segment traffic is seen with
-  no extra hardware; full east-west needs a managed switch or segmented ports.
+  Who is talking to whom, and how much. The baseline view below is always on and
+  built in — the kernel exports flow summaries to an on-box collector, no extra
+  software. The ntopng power tier adds deep packet inspection when you opt in.
   This complements the always-on <a href="/traffic">Traffic</a> graph.
 </p>
 
-<h2>Settings</h2>
+<h2>Flows <span class="muted">(baseline)</span></h2>
+<form method="post" action="/flow/settings" class="row-form">
+  <label class="check">
+    <input type="checkbox" name="enabled" {{if .Cfg.Flow.Enabled}}checked{{end}}> Enabled
+  </label>
+  {{range .Cfg.Interfaces}}
+  <label class="check">
+    <input type="checkbox" name="interfaces" value="{{.Name}}"
+      {{if $.Cfg.Flow.IsMonitored .Name}}checked{{end}}>
+    {{.Name}} <span class="muted">({{.Device}})</span>
+  </label>
+  {{end}}
+  <button type="submit">Save</button>
+</form>
+
+{{if .Cfg.Flow.Enabled}}
+<div class="traffic-ranges">
+  <button type="button" data-range="hour" class="secondary active">Hour</button>
+  <button type="button" data-range="day" class="secondary">Day</button>
+  <button type="button" data-range="week" class="secondary">Week</button>
+  <button type="button" data-range="month" class="secondary">Month</button>
+</div>
+
+<div class="flow-grid">
+  <div class="card">
+    <h3>Top talkers</h3>
+    <table class="flow-table" id="flow-talkers"><thead>
+      <tr><th>Host</th><th class="num">In</th><th class="num">Out</th><th class="num">Total</th></tr>
+    </thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h3>Top apps</h3>
+    <table class="flow-table" id="flow-apps"><thead>
+      <tr><th>App</th><th class="num">Bytes</th></tr>
+    </thead><tbody></tbody></table>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Recent flows</h3>
+  <table class="flow-table" id="flow-recent"><thead>
+    <tr><th>Time</th><th>Source</th><th>Destination</th><th>Proto</th><th class="num">Bytes</th><th class="num">Pkts</th></tr>
+  </thead><tbody></tbody></table>
+</div>
+<p class="muted" id="flow-status">loading…</p>
+{{else}}
+<p class="muted">Baseline visibility is disabled. Enable it and <a href="/system">apply</a> to start collecting flows.</p>
+{{end}}
+
+<h2>Deep analysis <span class="muted">(ntopng power tier)</span></h2>
+<p class="muted">
+  Opt-in deep packet inspection with nDPI app identification. Heavier than the
+  baseline — enable only when you need the forensic deep-dive.
+</p>
 <form method="post" action="/visibility/settings" class="row-form">
   <label class="check">
     <input type="checkbox" name="enabled" {{if .Cfg.Visibility.Enabled}}checked{{end}}> Enabled
@@ -15,13 +68,6 @@
   <label>Web UI port (localhost)
     <input name="http_port" size="6" value="{{with .Cfg.Visibility.HTTPPort}}{{.}}{{end}}" placeholder="3000">
   </label>
-  <button type="submit">Save</button>
-</form>
-
-<h2>Monitored interfaces</h2>
-<form method="post" action="/visibility/settings" class="row-form">
-  <input type="hidden" name="enabled" value="{{if .Cfg.Visibility.Enabled}}on{{end}}">
-  <input type="hidden" name="http_port" value="{{with .Cfg.Visibility.HTTPPort}}{{.}}{{end}}">
   {{range .Cfg.Interfaces}}
   <label class="check">
     <input type="checkbox" name="interfaces" value="{{.Name}}"
@@ -33,10 +79,87 @@
 </form>
 
 {{if .Cfg.Visibility.Enabled}}
-<h2>Analyzer</h2>
 <p class="muted">Changes take effect after you <a href="/system">apply</a> the configuration.</p>
 <iframe src="/visibility/app/" title="ntopng" class="embed"></iframe>
-{{else}}
-<p class="muted">Enable visibility and apply the configuration to start the analyzer.</p>
 {{end}}
+
+<script>
+(function () {
+  "use strict";
+  if (!document.getElementById("flow-status")) return; // baseline disabled
+  var range = "hour";
+  var refreshMs = { hour: 10000, day: 30000, week: 60000, month: 60000 };
+  var timer = null;
+
+  function fmtBytes(n) {
+    var u = ["B", "K", "M", "G", "T"], i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + " " + u[i];
+  }
+  var PROTO = { 1: "ICMP", 6: "TCP", 17: "UDP", 47: "GRE", 58: "ICMP6" };
+  function fmtProto(p) { return PROTO[p] || String(p); }
+  function fmtTime(t) {
+    var d = new Date(t * 1000), p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
+    });
+  }
+  function fill(id, rows) {
+    var body = document.querySelector("#" + id + " tbody");
+    body.innerHTML = rows.length ? rows.join("") :
+      '<tr><td colspan="6" class="muted">no data yet</td></tr>';
+  }
+
+  function render(d) {
+    fill("flow-talkers", (d.talkers || []).map(function (t) {
+      return "<tr><td>" + esc(t.host) + "</td><td class='num'>" + fmtBytes(t.in) +
+        "</td><td class='num'>" + fmtBytes(t.out) + "</td><td class='num'>" +
+        fmtBytes(t.in + t.out) + "</td></tr>";
+    }));
+    fill("flow-apps", (d.apps || []).map(function (a) {
+      return "<tr><td>" + esc(a.app) + "</td><td class='num'>" + fmtBytes(a.bytes) + "</td></tr>";
+    }));
+    fill("flow-recent", (d.recent || []).map(function (f) {
+      return "<tr><td>" + fmtTime(f.t) + "</td><td>" + esc(f.src) + ":" + f.sport +
+        "</td><td>" + esc(f.dst) + ":" + f.dport + "</td><td>" + fmtProto(f.proto) +
+        "</td><td class='num'>" + fmtBytes(f.bytes) + "</td><td class='num'>" + f.pkts + "</td></tr>";
+    }));
+  }
+
+  function load() {
+    fetch("/api/flows?range=" + range, { headers: { "HX-Request": "true" } })
+      .then(function (r) {
+        if (r.status === 401) { window.location = "/login"; return null; }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        if (!d) return;
+        render(d);
+        document.getElementById("flow-status").textContent =
+          "updated " + new Date().toLocaleTimeString();
+      })
+      .catch(function (e) {
+        document.getElementById("flow-status").textContent = "error: " + e.message;
+      });
+  }
+  function schedule() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(load, refreshMs[range] || 30000);
+  }
+  document.querySelectorAll(".traffic-ranges button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      range = b.dataset.range;
+      document.querySelectorAll(".traffic-ranges button").forEach(function (x) {
+        x.classList.toggle("active", x === b);
+      });
+      load(); schedule();
+    });
+  });
+  load(); schedule();
+})();
+</script>
 {{end}}

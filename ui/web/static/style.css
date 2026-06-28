@@ -175,6 +175,12 @@ main.login button { width: 100%; margin-top: 0.4rem; }
 .chart-card .legend { display: inline-flex; align-items: center; gap: 0.3rem; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
 .chart-card .legend i { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: inline-block; margin-left: 0.4rem; }
 
+/* Visibility baseline flow view */
+.flow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.flow-table { font-variant-numeric: tabular-nums; }
+.flow-table th, .flow-table td { padding: 0.3rem 0.6rem; }
+.flow-table .num { text-align: right; }
+
 /* Shell page */
 .shell-warn { margin-bottom: 1rem; }
 .shell-term {

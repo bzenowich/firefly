@@ -18,6 +18,7 @@ import (
 // appliance's auth and adds no separate listener.
 func (s *Server) routesVisibility() {
 	s.mux.HandleFunc("POST /visibility/settings", s.handleVisibilitySettings)
+	s.mux.HandleFunc("POST /flow/settings", s.handleFlowSettings)
 	// Subtree proxy to ntopng. The prefix matches ntopng's --http-prefix so the
 	// links it generates route straight back here. All methods (it POSTs too).
 	// ServeHTTP's session gate already covers this non-public subtree.
@@ -51,6 +52,29 @@ func (s *Server) handleVisibilitySettings(w http.ResponseWriter, r *http.Request
 			c.Visibility.Interfaces = nil
 		} else {
 			c.Visibility.Interfaces = selected
+		}
+		return nil
+	})
+	redirect(w, r, "/visibility", err)
+}
+
+// handleFlowSettings saves the baseline flow block: the master toggle and the
+// per-interface breakdown selection. Mirrors handleVisibilitySettings; the
+// pflow exporter is (re)configured on the next apply.
+func (s *Server) handleFlowSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		redirect(w, r, "/visibility", err)
+		return
+	}
+	enabled := r.FormValue("enabled") == "on"
+	selected := r.Form["interfaces"]
+	err := s.store.Update(func(c *config.Config) error {
+		c.Flow.Enabled = enabled
+		// Empty == all interfaces; collapse "every box checked" to that default.
+		if len(selected) == len(c.Interfaces) {
+			c.Flow.Interfaces = nil
+		} else {
+			c.Flow.Interfaces = selected
 		}
 		return nil
 	})

@@ -22,6 +22,7 @@ import (
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/auth"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
 	"firewall/ui/internal/render"
 	"firewall/ui/internal/system"
@@ -62,6 +63,7 @@ type Server struct {
 	mgr       *apply.Manager
 	logStore  *logs.Store
 	traffic   *traffic.Store
+	flow      *flow.Store
 	mux       *http.ServeMux
 	sessions  *auth.Sessions
 	logins    *auth.Limiter
@@ -104,12 +106,13 @@ func contains(list []string, v string) bool {
 	return false
 }
 
-func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStore *traffic.Store) (*Server, error) {
+func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStore *traffic.Store, flowStore *flow.Store) (*Server, error) {
 	s := &Server{
 		store:       store,
 		mgr:         mgr,
 		logStore:    logStore,
 		traffic:     trafStore,
+		flow:        flowStore,
 		mux:         http.NewServeMux(),
 		sessions:    auth.NewSessions(sessionTTL),
 		logins:      auth.NewLimiter(loginMaxFails, loginWindow),
@@ -185,6 +188,7 @@ func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStor
 	s.mux.HandleFunc("GET /partials/stats", s.handleStatsPartial)
 	s.mux.HandleFunc("GET /partials/logs", s.handleLogsPartial)
 	s.mux.HandleFunc("GET /api/traffic", s.handleTrafficAPI)
+	s.mux.HandleFunc("GET /api/flows", s.handleFlowsAPI)
 	s.mux.HandleFunc("GET /system/pf.conf", s.handlePFPreview)
 	s.mux.HandleFunc("POST /system/hostname", s.handleSetHostname)
 	s.mux.HandleFunc("POST /interfaces/{name}/address", s.handleInterfaceAddress)
@@ -486,6 +490,22 @@ func (s *Server) handleTrafficAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		log.Printf("traffic encode: %v", err)
+	}
+}
+
+// handleFlowsAPI serves the baseline flow summary (top talkers, per-app totals,
+// volume series, and a recent flow log) as JSON for the Visibility page. The
+// ?range= param selects hour/day/week/month.
+func (s *Server) handleFlowsAPI(w http.ResponseWriter, r *http.Request) {
+	res, err := s.flow.Query(r.URL.Query().Get("range"))
+	if err != nil {
+		log.Printf("flow query: %v", err)
+		http.Error(w, "flow query failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(res); err != nil {
+		log.Printf("flow encode: %v", err)
 	}
 }
 
