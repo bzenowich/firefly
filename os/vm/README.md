@@ -29,11 +29,12 @@ cheap and the base never gets dirtied.
 ## NICs and the pf test layout
 
 Three NICs: `vtnet0` is the QEMU user net carrying the SSH/WebUI host
-forwards; `vtnet1`/`vtnet2` are peerless socket backends. For end-to-end pf
-testing, map the roles **LAN → vtnet0**, WAN → vtnet1, OPT → vtnet2: the
-rendered ruleset passes LAN traffic, so management over the host forwards
-survives the applied default-deny ruleset. (Host forwards arrive as inbound
-connections on vtnet0.)
+forwards; `vtnet1`/`vtnet2` are peerless socket backends. The roles map
+**LAN → vtnet0**, WAN → vtnet1, OPT → vtnet2: the rendered ruleset passes LAN
+traffic, so management over the host forwards survives the applied default-deny
+ruleset. (Host forwards arrive as inbound connections on vtnet0.) provision.sh
+seeds this mapping into `/root/fw.json` and aliases the LAN IP (192.168.1.1)
+onto vtnet0, so the first `apply` validates with no manual remap.
 
 Gotchas learned the hard way (provision.sh handles both):
 
@@ -53,8 +54,10 @@ Gotchas learned the hard way (provision.sh handles both):
 First apply needs in the guest: `pkg install kea unbound wireguard-tools
 ntopng`, `sysrc pf_enable=YES pflog_enable=YES kea_enable=YES
 unbound_enable=YES wireguard_enable=YES ntopng_enable=YES`, a permissive seed
-`/etc/pf.conf` (`pass all`), and `service pf start && service pflog start`.
-provision.sh does all of it.
+`/etc/pf.conf` (`pass all`), the seed `/root/fw.json` (role→vtnet mapping) and
+the LAN-IP alias. provision.sh does all of it, so `./deploy.sh` then start fwd,
+create the admin in the WebUI, and Apply works out of the box — baseline
+visibility included (native `pflow(4)`, FreeBSD 15+).
 
 The ntopng web UI is reverse-proxied by `fwd` under `/visibility/app/` (it
 binds localhost only); enable it on the Visibility page and apply.
