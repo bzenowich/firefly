@@ -82,7 +82,7 @@ appliance; Luciola is open hardware + open firmware + open source by design.
 
 | Feature | Luciola | Firewalla Purple |
 |---|---|---|
-| Base OS | FreeBSD 14.x (custom image, not a fork) | Custom Linux (Ubuntu-derived) |
+| Base OS | FreeBSD 15.x (custom image, not a fork) | Custom Linux (Ubuntu-derived) |
 | Firewall engine | `pf` (declarative config → `pf.conf`) | iptables/nftables + custom userland |
 | Update model | **ZFS boot environments** — one-command rollback | OTA app-pushed updates |
 | Config as data | Single declarative `config.json`, versioned, with history | App/cloud-stored config |

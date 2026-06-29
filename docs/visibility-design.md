@@ -113,11 +113,17 @@ block.
 
 ## 7. Open questions
 
+- **pflow availability** — *resolved (2026-06):* `pflow(4)` is FreeBSD **15.x only**
+  (Netgate upstreamed it into `sys/netpfil/pf/`; absent from every 14.x branch and not a
+  backportable standalone module — it needs pf-side KPI). The appliance therefore targets
+  FreeBSD 15.x (plan.md §6). On 14.x dev/test boxes the exporter falls back to **`ng_netflow`**
+  (netgraph, in base, NetFlow v9 — which this collector already decodes). `render/pflow.go`
+  is correct for the 15.x target as written.
 - **pflow granularity** — `pflow(4)` exports the whole pf state table, not per-interface.
   *Decided:* the join uses the 5-tuple only; ifindex is stored on the raw flow for display
   but is not part of the app-label key (see `docs/ndpi-helper-design.md` §4). Still to
-  confirm against a live box: that the FreeBSD `pflow(4)` IPFIX template carries ifindex at
-  all, and whether per-interface breakdown needs it.
+  confirm against a live FreeBSD-15 box: that the `pflow(4)` IPFIX template carries ifindex
+  at all, and whether per-interface breakdown needs it.
 - **Active-timeout latency** — long-lived flows only report on state expiry / active
   timeout, so the view is near-real-time, not per-packet. Still open: pick a sane active
   timeout (a pf-side setting, not a pflow knob). The collector's rollup runs every minute,

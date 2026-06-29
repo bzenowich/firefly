@@ -1,10 +1,13 @@
 #!/bin/sh -e
-# Fetch the FreeBSD VM base image (plan.md §6: 14.x, ZFS for boot
+# Fetch the FreeBSD VM base image (plan.md §6: 15.x, ZFS for boot
 # environments) and create the working overlay. The BASIC-CLOUDINIT variant
 # lets first-boot provisioning run via cloud-init instead of console scripting.
+#
+# 15.x is the appliance target: it carries native pflow(4) for the §8 baseline
+# visibility exporter, which is absent from all 14.x (see plan.md §6).
 cd "$(dirname "$0")"
 
-REL=14.4-RELEASE
+REL=15.1-RELEASE
 BASE=FreeBSD-$REL-amd64-BASIC-CLOUDINIT-zfs.qcow2
 URL=https://download.freebsd.org/releases/VM-IMAGES/$REL/amd64/Latest
 

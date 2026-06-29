@@ -1,7 +1,8 @@
 # os/vm — FreeBSD test VM
 
-QEMU/KVM VM on the plan.md §6 target OS (FreeBSD 14.x, ZFS) for testing the
-`fwd` daemon and, later, the image-build pipeline output.
+QEMU/KVM VM on the plan.md §6 target OS (FreeBSD 15.x, ZFS) for testing the
+`fwd` daemon and, later, the image-build pipeline output. 15.x is required for
+native `pflow(4)` — the §8 baseline visibility exporter, absent from 14.x.
 
 ```
 ./fetch.sh      # download base image (once), create disk overlay

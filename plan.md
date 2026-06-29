@@ -132,8 +132,12 @@ Program Office** confirms a public FSP; the LPDDR5-ECC/Gen4 advantages don't mat
 
 ## 6. Operating system
 
-- **Base:** FreeBSD 14.x-RELEASE (track 15.x by ship time), custom-built image —
-  *not* a pfSense fork; clean-room product with its own identity
+- **Base:** FreeBSD **15.x-RELEASE**, custom-built image — *not* a pfSense fork;
+  clean-room product with its own identity. (15.x is required for native
+  `pflow(4)`: Netgate upstreamed it into the pf tree in `main`, so it ships in
+  15.x but is **absent from all 14.x** — it backs the §8 baseline visibility
+  exporter. 14.x dev boxes fall back to `ng_netflow`. See
+  docs/visibility-design.md §7.)
 - **Filesystem:** ZFS with **boot environments** (`bectl`) — every system update is a
   new BE, one-command rollback, the killer feature for an appliance
 - **Image build:** poudriere for packages + a reproducible `mkimg`-based image

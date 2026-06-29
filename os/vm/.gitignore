@@ -4,6 +4,8 @@ CHECKSUM.SHA256
 known_hosts
 console.sock
 qemu.pid
+fwtest-qemu.pid
+boot-console.log
 provision.cmds
 fwd-freebsd
 serial.log
