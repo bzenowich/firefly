@@ -14,7 +14,6 @@ const (
 	KeaConfPath     = "/usr/local/etc/kea/kea-dhcp4.conf"
 	UnboundConfPath = "/usr/local/etc/unbound/unbound.conf"
 	NtopngConfPath  = "/usr/local/etc/ntopng/ntopng.conf"
-	PflowConfPath   = "/etc/rc.conf.d/pflow"
 	WGConfDir       = "/usr/local/etc/wireguard"
 )
 
@@ -80,10 +79,10 @@ func plan(cfg config.Config) ([]file, error) {
 			reload: ntopngReload(cfg),
 		},
 		{
-			// pflow0 is recreated from this rc.conf.d fragment on apply. No
-			// offline checker; the kernel validates the create args. Destroy
-			// first so changed flowdst/port take effect; tolerate absence.
-			path: PflowConfPath, mode: 0o644, content: pflowConf,
+			// pflow is configured imperatively via pflowctl(8) wrapped in an
+			// rc.d service (render.Pflow). The script is executable; its start
+			// is idempotent. No offline checker — the kernel validates pflowctl.
+			path: render.PflowRcPath, mode: 0o755, content: pflowConf,
 			reload: pflowReload(cfg),
 		},
 	}
@@ -98,20 +97,28 @@ func plan(cfg config.Config) ([]file, error) {
 }
 
 // ntopngReload picks the service action for a changed ntopng.conf: bring it up
-// when visibility is on, take it down when off.
+// when visibility is on, take it down when off. The stop is tolerant — a
+// feature that is off (and so already stopped) must not fail the whole apply.
 func ntopngReload(cfg config.Config) []string {
 	if cfg.Visibility.Enabled {
 		return []string{"service", "ntopng", "restart"}
 	}
-	return []string{"service", "ntopng", "stop"}
+	return tolerantStop("ntopng")
 }
 
-// pflowReload recreates pflow0 from the rendered rc.conf.d fragment when
-// baseline flow is on, or destroys it when off. The destroy tolerates a missing
-// interface so a no-op apply (already off) doesn't fail.
+// tolerantStop stops a service without failing when it is already stopped, so an
+// off-by-default feature doesn't roll back an otherwise-good apply.
+func tolerantStop(svc string) []string {
+	return []string{"sh", "-c", "service " + svc + " onestop 2>/dev/null || true"}
+}
+
+// pflowReload (re)applies the rendered pflow service: a restart reconfigures the
+// exporter when baseline flow is on; a stop tears it down when off. `one*`
+// bypasses the rcvar so apply works whether or not the image enabled the service
+// (boot persistence is the image's job via fwpflow_enable=YES).
 func pflowReload(cfg config.Config) []string {
 	if cfg.Flow.Enabled {
-		return []string{"sh", "-c", "ifconfig pflow0 destroy 2>/dev/null; service netif cloneup"}
+		return []string{"service", render.PflowService, "onerestart"}
 	}
-	return []string{"sh", "-c", "ifconfig pflow0 destroy 2>/dev/null || true"}
+	return tolerantStop(render.PflowService)
 }
