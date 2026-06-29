@@ -8,19 +8,22 @@ out of scope here except where the two share UI.
 
 ## 1. Current state
 
-Already built (and correct, but it is the **power tier**, not the baseline):
+The **baseline** described here is **built** (Phases 1–2; see §6):
 
-- `config.Visibility` — enabled / monitored-interfaces / HTTP port
-- `render/ntopng.go` — generates `ntopng.conf` (Redis-less community mode)
-- `server/visibility.go` — reverse-proxies ntopng under `/visibility/app` behind the
-  WebUI session (appliance auth is the single front door)
-- `web/templates/pages/visibility.html` — settings form + ntopng iframe
+- `internal/flow` — IPFIX/NetFlow-v9 collector, SQLite store (raw flows + per-host/per-app
+  rollups), the `Label` enrichment protocol, `LabelCache` + unix-socket `LabelServer`, and
+  the top-talkers/volume/flow-log queries
+- `render/pflow.go` — renders the `pflow(4)` exporter setup
+- `config.Flow` — baseline toggle + monitored interfaces (split from `Visibility`)
+- `cmd/ndpi-helper` — the separate DPI process (stub classifier in-tree; real libpcap +
+  libnDPI behind build tags, built in the OS image — the one piece still outstanding)
+- `web/templates/pages/visibility.html` + `/api/flows` — the native Flows view
+
+The **power tier** (ntopng) was already built and now sits below the baseline view as the
+opt-in deep-dive: `config.Visibility`, `render/ntopng.go`, `server/visibility.go`.
 
 The `traffic` package is unrelated: it samples per-interface **throughput** (bytes/sec)
 into a ring buffer for the Traffic Graph (§7). It is not flow data.
-
-**Missing — everything in this document:** `pflow(4)` export, the Go IPFIX collector, the
-flow database, the nDPI helper, and the native flow UI. The baseline has not been started.
 
 ## 2. Architecture
 
@@ -92,24 +95,39 @@ block.
 
 ## 6. Build phasing
 
-1. **`pflow` → collector → SQLite → native top-talkers UI**, `app` column empty. Flow
-   volume and who-talks-to-whom work immediately — pure Go + kernel, no C dependency.
-   Biggest value for least risk; ship this first.
-2. **nDPI helper** — adds app names onto flows. Separate binary with its own build; the
-   only C dependency at baseline.
-3. **ntopng power tier** — already built; just re-gate it as opt-in.
+1. **✅ Done** — **`pflow` → collector → SQLite → native top-talkers UI**, `app` column
+   empty. Flow volume and who-talks-to-whom work immediately — pure Go + kernel, no C
+   dependency. Shipped: `internal/flow` (IPFIX/NetFlow-v9 collector + SQLite store with raw
+   flows and per-host/per-app rollups), `render/pflow.go`, the `config.Flow` block, and the
+   native Flows panel on the Visibility page (`/api/flows`).
+2. **✅ Done (pure-Go parts)** — **nDPI helper** — adds app names onto flows. Separate
+   binary (`cmd/ndpi-helper`) so libnDPI's LGPL stays out of fwd. Shipped: the `Label` wire
+   protocol + direction-normalized join, `LabelCache` + unix-socket `LabelServer`,
+   stamp-at-insert + backfill, the helper's flow-state engine with a stub port-based
+   classifier, and fwd's supervision. **Remaining:** the real libpcap capture
+   (`source_pcap.go`) and libnDPI classification (`classifier_ndpi.go`) behind `//go:build
+   pcap` / `ndpi`, built only in the OS image. See `docs/ndpi-helper-design.md`.
+3. **ntopng power tier** — already built; just re-gate it as opt-in. *(The Visibility page
+   already reframes ntopng as the opt-in power tier below the baseline Flows view; the
+   apply-time install/enable gating is the remaining piece.)*
 
 ## 7. Open questions
 
 - **pflow granularity** — `pflow(4)` exports the whole pf state table, not per-interface.
-  Per-interface filtering is therefore a collector-side concern via ifindex (or skipped at
-  baseline). Confirm the FreeBSD `pflow(4)` IPFIX template actually carries ifindex.
+  *Decided:* the join uses the 5-tuple only; ifindex is stored on the raw flow for display
+  but is not part of the app-label key (see `docs/ndpi-helper-design.md` §4). Still to
+  confirm against a live box: that the FreeBSD `pflow(4)` IPFIX template carries ifindex at
+  all, and whether per-interface breakdown needs it.
 - **Active-timeout latency** — long-lived flows only report on state expiry / active
-  timeout, so the view is near-real-time, not per-packet. Pick a sane active timeout.
-- **nDPI capture source** — libpcap vs netmap, and whether the helper sniffs the
-  interfaces directly or reads a pf divert. Drives the helper's CPU cost.
-- **Helper packaging** — `libnDPI` is LGPL; ship the helper as a base-image package built
-  in the OS pipeline, linked dynamically, never static-linked into fwd.
+  timeout, so the view is near-real-time, not per-packet. Still open: pick a sane active
+  timeout (a pf-side setting, not a pflow knob). The collector's rollup runs every minute,
+  so sub-minute latency here is moot for the rollup views.
+- **nDPI capture source** — *leaning libpcap* (the `source_pcap.go` seam targets it);
+  netmap vs a pf divert remains an option if CPU cost demands it. Decided on this box in
+  Phase 2.
+- **Helper packaging** — *decided:* base-image package built in the OS pipeline with
+  `-tags "pcap ndpi"`, libnDPI linked dynamically, never static, never into fwd
+  (`docs/ndpi-helper-design.md` §7).
 
 ## 8. Cross-references
 
