@@ -119,6 +119,13 @@ Cache entries carry an insertion time and are evicted after a short TTL (a few
 minutes — well past the gap between classification and export). The cache is
 bounded by TTL, not count; flow rates on a home/SMB box keep it small.
 
+The TTL alone cannot cover **long-lived flows**: `pflow(4)` exports only at pf
+state teardown, so an hours-long stream — exactly the flow whose app label
+matters most — would outlive any sane TTL. The helper closes this gap by
+**re-emitting** a classified flow's label while the flow stays active (every
+`labelRefresh`, below the cache TTL), keeping the cache entry warm until the
+export finally arrives.
+
 ## 6. Helper internals (`cmd/ndpi-helper`)
 
 ```
@@ -144,8 +151,10 @@ is testable in pure Go:
 The **Engine** owns the flow-state table: `map[normKey]*flowState{pkts, ndpi,
 done}`. For each packet it routes to the flow's state, feeds the Classifier
 until `done` (verdict reached or a max-packet cap hit), emits one `Label` on
-verdict, and stops inspecting that flow. Idle flows are evicted on a timer so
-the table is bounded.
+verdict, and stops inspecting that flow. Later packets of a labeled flow only
+re-emit the stored label on the `labelRefresh` interval (§5 — long-lived flows
+must outlast the collector's cache TTL); the classifier is never fed again.
+Idle flows are evicted on a timer so the table is bounded.
 
 The wire types (`flow.Label`, the NDJSON reader/writer, and the normalized key)
 live in `internal/flow` as **pure Go** and are imported by the helper. Sharing

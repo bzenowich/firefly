@@ -18,4 +18,9 @@ type FlowState struct {
 // library.
 type Classifier interface {
 	Classify(st *FlowState, p Packet) (app string, done bool)
+	// Release frees any per-flow resources the classifier attached to st (e.g. a
+	// libnDPI flow handle in st.cls). The engine calls it once when a flow
+	// reaches its verdict and again if the flow is later evicted, so it must be
+	// idempotent — a nil st.cls means already released.
+	Release(st *FlowState)
 }

@@ -35,6 +35,9 @@ func newClassifier() Classifier { return stubClassifier{} }
 // Classify is one-shot: a port lookup needs no payload, so it returns a final
 // verdict on the first packet. An unknown port yields an empty label (the
 // engine emits nothing) so the flow log isn't polluted with guesses.
+// Release is a no-op: the stub attaches no per-flow resources.
+func (stubClassifier) Release(*FlowState) {}
+
 func (stubClassifier) Classify(_ *FlowState, p Packet) (string, bool) {
 	lo, hi := p.SPort, p.DPort
 	if hi < lo {

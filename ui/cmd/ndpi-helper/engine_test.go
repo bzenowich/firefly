@@ -24,7 +24,8 @@ func TestEngineEmitsOnePerFlow(t *testing.T) {
 	sink := &recordSink{}
 	eng := NewEngine(newChanSource(0), stubClassifier{}, sink)
 
-	// Three packets of the same TLS flow: exactly one label, no re-emit.
+	// Three packets of the same TLS flow: exactly one label — re-emit only
+	// happens after labelRefresh, not per packet.
 	for i := 0; i < 3; i++ {
 		eng.handle(pkt("10.0.0.5", 51000, "1.1.1.1", 443, 6))
 	}
@@ -33,6 +34,39 @@ func TestEngineEmitsOnePerFlow(t *testing.T) {
 	}
 	if sink.labels[0].App != "TLS" {
 		t.Errorf("app = %q, want TLS", sink.labels[0].App)
+	}
+}
+
+func TestEngineRefreshesLongFlows(t *testing.T) {
+	sink := &recordSink{}
+	eng := NewEngine(newChanSource(0), stubClassifier{}, sink)
+	now := time.Now()
+	eng.now = func() time.Time { return now }
+
+	// Verdict on the first packet, then a long-lived flow: each packet past
+	// labelRefresh re-emits so the collector cache stays warm until pflow
+	// exports at state teardown; packets inside the window do not.
+	eng.handle(pkt("10.0.0.5", 51000, "1.1.1.1", 443, 6))
+	now = now.Add(labelRefresh / 2)
+	eng.handle(pkt("10.0.0.5", 51000, "1.1.1.1", 443, 6))
+	if len(sink.labels) != 1 {
+		t.Fatalf("emitted %d labels inside the refresh window, want 1", len(sink.labels))
+	}
+	now = now.Add(labelRefresh)
+	eng.handle(pkt("10.0.0.5", 51000, "1.1.1.1", 443, 6))
+	if len(sink.labels) != 2 {
+		t.Fatalf("emitted %d labels after refresh interval, want 2", len(sink.labels))
+	}
+	if sink.labels[1].App != "TLS" {
+		t.Errorf("refreshed app = %q, want TLS", sink.labels[1].App)
+	}
+
+	// An unlabeled flow (classified-unknown) never re-emits.
+	eng.handle(pkt("10.0.0.5", 50000, "10.0.0.9", 49999, 6))
+	now = now.Add(labelRefresh * 2)
+	eng.handle(pkt("10.0.0.5", 50000, "10.0.0.9", 49999, 6))
+	if len(sink.labels) != 2 {
+		t.Fatalf("unknown flow re-emitted: %d labels, want 2", len(sink.labels))
 	}
 }
 
@@ -67,6 +101,7 @@ func TestEngineEvictsIdle(t *testing.T) {
 type countingClassifier struct{}
 
 func (countingClassifier) Classify(*FlowState, Packet) (string, bool) { return "", false }
+func (countingClassifier) Release(*FlowState)                         {}
 
 func TestEngineCapsClassification(t *testing.T) {
 	sink := &recordSink{}
