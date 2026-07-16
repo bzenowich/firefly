@@ -349,6 +349,32 @@ func (s *Store) Query(rangeName string) (Result, error) {
 	return res, nil
 }
 
+// HostTotals returns per-host in/out byte and packet totals over the named
+// range, keyed by host IP string, for every host seen (not just the top talkers
+// Query returns). The device table (internal/devices) joins this onto ARP/lease
+// data to attach per-device usage. An unknown range name defaults to "hour".
+func (s *Store) HostTotals(rangeName string) (map[string]Talker, error) {
+	_, w := resolveWindow(rangeName)
+	since := time.Now().Add(-time.Duration(w.span) * time.Second).Unix()
+	rows, err := s.db.Query(`
+		SELECT host, SUM(inb), SUM(outb), SUM(pkts)
+		FROM host_roll WHERE width = ? AND bucket >= ?
+		GROUP BY host`, w.width, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]Talker{}
+	for rows.Next() {
+		var t Talker
+		if err := rows.Scan(&t.Host, &t.In, &t.Out, &t.Pkts); err != nil {
+			return nil, err
+		}
+		out[t.Host] = t
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) queryTalkers(width int, since int64) ([]Talker, error) {
 	rows, err := s.db.Query(`
 		SELECT host, SUM(inb), SUM(outb), SUM(pkts)

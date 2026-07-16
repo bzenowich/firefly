@@ -29,6 +29,7 @@ type Config struct {
 	DHCP       []DHCPServer `json:"dhcp"`
 	DNS        DNS          `json:"dns"`
 	WireGuard  WireGuard    `json:"wireguard"`
+	Devices    []Device     `json:"devices,omitempty"`
 	Flow       Flow         `json:"flow"`
 	Visibility Visibility   `json:"visibility"`
 	Shell      Shell        `json:"shell"`
@@ -339,6 +340,43 @@ type StaticLease struct {
 	Hostname string `json:"hostname"`
 }
 
+// Device is a user-assigned identity for a host on the network, keyed by its
+// hardware MAC. It is naming/metadata only — deliberately not a policy target:
+// docs/parental.md argues segment-based policy over per-MAC rules, and MAC
+// randomization makes MAC-as-policy fragile. The registry exists so the Devices
+// page and the flow views can show "Living-room TV" instead of a bare
+// 10.0.0.14, and because it is keyed by MAC it survives DHCP lease churn and IP
+// reassignment. Stored in the config document so the single-file backup carries
+// it (plan.md §7). The live device table (internal/devices) joins this registry
+// with the ARP/NDP tables, DHCP leases, and flow byte totals at request time —
+// only the durable naming lives here.
+type Device struct {
+	MAC  string `json:"mac"`            // canonical lower-case colon form (see NormalizeMAC)
+	Name string `json:"name"`           // friendly label the admin assigns
+	Note string `json:"note,omitempty"` // optional freeform note
+}
+
+// DeviceByMAC returns the registry entry for a MAC (already normalized), if any.
+func (c *Config) DeviceByMAC(mac string) (Device, bool) {
+	for _, d := range c.Devices {
+		if d.MAC == mac {
+			return d, true
+		}
+	}
+	return Device{}, false
+}
+
+// NormalizeMAC parses and canonicalizes a hardware address to lower-case
+// colon-separated form, so registry lookups and joins against ARP/lease output
+// compare equal regardless of the input's case or separator.
+func NormalizeMAC(s string) (string, error) {
+	hw, err := net.ParseMAC(strings.TrimSpace(s))
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(hw.String()), nil
+}
+
 type DNS struct {
 	Enabled   bool           `json:"enabled"`
 	Adblock   Adblock        `json:"adblock"`
@@ -494,8 +532,34 @@ func (c *Config) Validate() error {
 	if err := c.validateFlow(); err != nil {
 		return err
 	}
+	if err := c.validateDevices(); err != nil {
+		return err
+	}
 	if err := c.validateUsers(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateDevices checks the device registry: every entry needs a name and a
+// well-formed, unique MAC. MACs are normalized in place so stored config always
+// holds the canonical form the runtime join keys on.
+func (c *Config) validateDevices() error {
+	seen := map[string]bool{}
+	for i := range c.Devices {
+		d := &c.Devices[i]
+		if strings.TrimSpace(d.Name) == "" {
+			return fmt.Errorf("device %q: name is required", d.MAC)
+		}
+		mac, err := NormalizeMAC(d.MAC)
+		if err != nil {
+			return fmt.Errorf("device %q: invalid mac", d.Name)
+		}
+		d.MAC = mac
+		if seen[mac] {
+			return fmt.Errorf("device %s: duplicate mac", mac)
+		}
+		seen[mac] = true
 	}
 	return nil
 }
