@@ -23,9 +23,11 @@ func TestQueryBuckets(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now()
-	// Two samples 30s apart land in the same 60s "hour" bucket; their rx
-	// should average.
-	base := now.Add(-90 * time.Second)
+	// Two samples 20s apart land in the same 60s "hour" bucket; their rx
+	// should average. Buckets are epoch-aligned ((ts/60)*60), so pin the base
+	// to a bucket boundary — otherwise the pair straddles two buckets
+	// depending on where wall-clock "now" happens to sit within the minute.
+	base := time.Unix(now.Add(-90*time.Second).Unix()/60*60, 0)
 	if err := s.insert(base, []ifRate{{iface: "eth0", rx: 100, tx: 10}}); err != nil {
 		t.Fatal(err)
 	}

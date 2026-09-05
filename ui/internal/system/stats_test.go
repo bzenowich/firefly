@@ -1,6 +1,7 @@
 package system
 
 import (
+	"net"
 	"runtime"
 	"testing"
 )
@@ -38,8 +39,29 @@ func TestCollect(t *testing.T) {
 		}
 	}
 	if len(s.Ifaces) == 0 {
+		// A network namespace with only lo (containers, some CI) has nothing
+		// for Collect to report, which is not a failure of Collect. Only skip
+		// once the host really has no non-loopback interface — if it has one
+		// and Collect missed it, that is the bug this test is here to catch.
+		if !hasNonLoopback(t) {
+			t.Skip("host has no non-loopback interface")
+		}
 		t.Error("no interfaces")
 	} else if !traffic {
 		t.Error("no interface counters collected")
 	}
+}
+
+func hasNonLoopback(t *testing.T) bool {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("net.Interfaces: %v", err)
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback == 0 {
+			return true
+		}
+	}
+	return false
 }
