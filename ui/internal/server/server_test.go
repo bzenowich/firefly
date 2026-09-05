@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -269,7 +270,7 @@ func TestLoginLogout(t *testing.T) {
 func TestLoginRateLimit(t *testing.T) {
 	c, _ := newTestServer(t)
 	// Fail against a throwaway username so only the address bucket trips,
-	// isolating it from the per-username bucket.
+	// isolating it from the per-username bucket exercised below.
 	for range loginMaxFails {
 		login(c.srv, "10.0.0.9:1234", "nobody", "wrong")
 	}
@@ -283,6 +284,43 @@ func TestLoginRateLimit(t *testing.T) {
 	w = login(c.srv, "10.0.0.10:1234", "admin", "correct horse")
 	if w.Header().Get("Location") != "/" {
 		t.Errorf("clean IP blocked: location %q", w.Header().Get("Location"))
+	}
+}
+
+// TestLoginRateLimitPerUsername covers the second limiter bucket
+// (design-review §4.6): failures spread across addresses must still lock the
+// account, or a botnet grinds one account unthrottled.
+func TestLoginRateLimitPerUsername(t *testing.T) {
+	c, _ := newTestServer(t)
+	for i := range loginMaxFails {
+		login(c.srv, fmt.Sprintf("10.0.1.%d:1234", i), "admin", "wrong")
+	}
+	// A never-seen address, but the username bucket is spent.
+	w := login(c.srv, "10.0.1.99:1234", "admin", "correct horse")
+	loc, _ := url.Parse(w.Header().Get("Location"))
+	if !strings.Contains(loc.Query().Get("err"), "too many") {
+		t.Errorf("want username lockout, got %q", loc.Query().Get("err"))
+	}
+}
+
+// TestLoginRateLimitIPv6Prefix covers /64 address bucketing (design-review
+// §4.6): without it an attacker rotates addresses inside their own /64 for
+// unlimited tries.
+func TestLoginRateLimitIPv6Prefix(t *testing.T) {
+	c, _ := newTestServer(t)
+	for i := range loginMaxFails {
+		login(c.srv, fmt.Sprintf("[2001:db8::%x]:1234", i), "nobody", "wrong")
+	}
+	// Different address, same /64.
+	w := login(c.srv, "[2001:db8::dead]:1234", "admin", "correct horse")
+	loc, _ := url.Parse(w.Header().Get("Location"))
+	if !strings.Contains(loc.Query().Get("err"), "too many") {
+		t.Errorf("want /64 lockout, got %q", loc.Query().Get("err"))
+	}
+	// A different /64 is unaffected.
+	w = login(c.srv, "[2001:db8:1::1]:1234", "admin", "correct horse")
+	if w.Header().Get("Location") != "/" {
+		t.Errorf("clean /64 blocked: location %q", w.Header().Get("Location"))
 	}
 }
 
