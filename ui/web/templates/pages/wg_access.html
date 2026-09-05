@@ -15,6 +15,7 @@
 
 {{if .Cfg.Services}}
 <form method="post" action="/wireguard/server/clients/{{.Client.ID}}">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <div class="access-controls">
     <input type="search" id="svc-filter" placeholder="Filter services…" oninput="filterSvc()" autocomplete="off">
     <button type="button" class="secondary" onclick="setVisible(true)">Select shown</button>

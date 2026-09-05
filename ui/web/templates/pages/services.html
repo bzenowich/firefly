@@ -11,6 +11,7 @@
     <tr>
       <td colspan="4">
         <form method="post" action="/services/{{.ID}}" class="row-form">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input name="name" value="{{.Name}}" placeholder="name" required>
           <input name="ip" value="{{.IP}}" size="15" placeholder="192.168.1.10" required>
           <input name="port" value="{{.Port}}" size="6" required>
@@ -32,6 +33,7 @@
       <td class="actions">
         <a href="/services?edit={{.ID}}" class="button-link">Edit</a>
         <form method="post" action="/services/{{.ID}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="danger">Delete</button>
         </form>
       </td>
@@ -46,6 +48,7 @@
 
 <h2>Add service</h2>
 <form method="post" action="/services" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Name <input name="name" placeholder="NAS" required></label>
   <label>Host IP <input name="ip" size="15" placeholder="192.168.1.10" required></label>
   <label>Port <input name="port" size="6" placeholder="443" required></label>

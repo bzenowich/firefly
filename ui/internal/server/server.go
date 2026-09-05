@@ -5,6 +5,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"firewall/ui/internal/apply"
 	"firewall/ui/internal/auth"
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/devices"
 	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
 	"firewall/ui/internal/render"
@@ -48,6 +51,7 @@ var pages = []Page{
 	{Path: "/logs", Title: "Logs", tmpl: "logs.html"},
 	{Path: "/traffic", Title: "Traffic", tmpl: "traffic.html"},
 	{Path: "/visibility", Title: "Visibility", tmpl: "visibility.html"},
+	{Path: "/devices", Title: "Devices", tmpl: "devices.html"},
 	{Path: "/system", Title: "System", tmpl: "system.html"},
 }
 
@@ -56,7 +60,22 @@ const (
 	sessionTTL    = 12 * time.Hour // idle timeout; activity extends it
 	loginMaxFails = 5
 	loginWindow   = 15 * time.Minute
+
+	// CSRF synchronizer token: forms carry it as a hidden field, htmx sends it
+	// as a header via layout.html's hx-headers.
+	csrfHeader = "X-CSRF-Token"
+	csrfField  = "csrf_token"
+
+	// deviceUsageRange is the flow window the Devices page attributes usage
+	// over — a day, which is what "how much has this thing used" means to an
+	// admin looking at the table.
+	deviceUsageRange = "day"
 )
+
+// errInvalidLogin is the single failure message the login form ever shows. A
+// distinct "invalid TOTP code" would confirm the password was right, turning
+// the second factor into a password oracle (design-review §4.6).
+var errInvalidLogin = errors.New("invalid username, password, or code")
 
 type Server struct {
 	store     *config.Store
@@ -70,8 +89,9 @@ type Server struct {
 	tmpls     map[string]*template.Template // page path -> parsed set
 	loginTmpl *template.Template
 
-	totpMu      sync.Mutex
-	totpPending map[string]string // user -> secret awaiting confirmation
+	totpMu       sync.Mutex
+	totpPending  map[string]string // user -> secret awaiting confirmation
+	totpLastStep map[string]int64  // user -> newest TOTP step already spent
 
 	shellMu     sync.Mutex
 	shellActive int // live web-shell sessions, capped by Shell.MaxSessions
@@ -79,6 +99,7 @@ type Server struct {
 
 var funcs = template.FuncMap{
 	"humanBytes": humanBytes,
+	"humanCount": humanCount,
 	"contains":   contains,
 	"service":    serviceByID,
 }
@@ -108,16 +129,17 @@ func contains(list []string, v string) bool {
 
 func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStore *traffic.Store, flowStore *flow.Store) (*Server, error) {
 	s := &Server{
-		store:       store,
-		mgr:         mgr,
-		logStore:    logStore,
-		traffic:     trafStore,
-		flow:        flowStore,
-		mux:         http.NewServeMux(),
-		sessions:    auth.NewSessions(sessionTTL),
-		logins:      auth.NewLimiter(loginMaxFails, loginWindow),
-		tmpls:       map[string]*template.Template{},
-		totpPending: map[string]string{},
+		store:        store,
+		mgr:          mgr,
+		logStore:     logStore,
+		traffic:      trafStore,
+		flow:         flowStore,
+		mux:          http.NewServeMux(),
+		sessions:     auth.NewSessions(sessionTTL),
+		logins:       auth.NewLimiter(loginMaxFails, loginWindow),
+		tmpls:        map[string]*template.Template{},
+		totpPending:  map[string]string{},
+		totpLastStep: map[string]int64{},
 	}
 
 	loginTmpl, err := template.ParseFS(web.FS, "templates/login.html")
@@ -234,7 +256,48 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	if !s.checkCSRF(w, r) {
+		return
+	}
 	s.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
+}
+
+// checkCSRF enforces the synchronizer token on every state-changing request,
+// writing the refusal itself and reporting whether the request may proceed.
+// SameSite=Lax alone is not a boundary: it still allows top-level cross-site
+// navigation and it is the browser's policy rather than ours (design-review
+// §4.4). The token is bound to the session and reaches us either as a hidden
+// form field or, for htmx, as the header layout.html's hx-headers attaches.
+// /login and /setup never get here — ServeHTTP short-circuits public paths —
+// which is deliberate: there is no session to bind a token to before login.
+func (s *Server) checkCSRF(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	// The ntopng subtree proxies a third-party UI whose forms we cannot rewrite,
+	// so it falls back to an Origin check: browsers send Origin on every
+	// state-changing request, and a cross-site one names a different host.
+	if strings.HasPrefix(r.URL.Path, render.NtopngHTTPPrefix+"/") {
+		if origin, err := url.Parse(r.Header.Get("Origin")); err == nil && sameOrigin(origin, r.Host) {
+			return true
+		}
+		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return false
+	}
+	var want string
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		want, _ = s.sessions.CSRF(c.Value)
+	}
+	got := r.Header.Get(csrfHeader)
+	if got == "" {
+		got = r.FormValue(csrfField) // parses the body; handlers reuse the cache
+	}
+	if want == "" || subtle.ConstantTimeCompare([]byte(want), []byte(got)) != 1 {
+		http.Error(w, "CSRF token missing or invalid", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // isPublic lists the routes reachable without a session: the login/setup
@@ -283,12 +346,24 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := remoteIP(r)
-	if !s.logins.Allow(ip) {
+	username := strings.TrimSpace(r.FormValue("username"))
+	// Two buckets, both of which must allow: the address bucket stops one host
+	// spraying every account, the username bucket stops a botnet — or one host
+	// walking its own IPv6 range — grinding a single account (design-review
+	// §4.6).
+	addrBucket, userBucket := limiterAddrKey(remoteIP(r)), limiterUserKey(username)
+	if !s.logins.Allow(addrBucket) || !s.logins.Allow(userBucket) {
 		redirect(w, r, "/login", errors.New("too many failed attempts, try again later"))
 		return
 	}
-	username := strings.TrimSpace(r.FormValue("username"))
+
+	// Every failure below reports errInvalidLogin: which factor was wrong is
+	// exactly what an attacker wants to know.
+	fail := func() {
+		s.logins.Fail(addrBucket)
+		s.logins.Fail(userBucket)
+		redirect(w, r, "/login", errInvalidLogin)
+	}
 
 	// Always run one argon2 verification, against DummyHash when the user
 	// does not exist, so timing does not reveal valid usernames.
@@ -299,24 +374,67 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !auth.VerifyPassword(hash, r.FormValue("password")) || !found {
-		s.logins.Fail(ip)
-		redirect(w, r, "/login", errors.New("invalid username or password"))
+		fail()
 		return
 	}
-	if totpSecret != "" && !auth.VerifyTOTP(totpSecret, r.FormValue("totp")) {
-		s.logins.Fail(ip)
-		redirect(w, r, "/login", errors.New("invalid TOTP code"))
-		return
+	if totpSecret != "" {
+		step, ok := auth.VerifyTOTPStep(totpSecret, r.FormValue("totp"))
+		if !ok || !s.totpSpend(username, step) {
+			fail()
+			return
+		}
 	}
 
-	s.logins.Reset(ip)
+	s.logins.Reset(addrBucket)
+	s.logins.Reset(userBucket)
 	s.setSessionCookie(w, r, s.sessions.Create(username))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// totpSpend records a TOTP time step as used by user and reports whether it was
+// still unspent. The ±1 step skew window keeps one code valid for up to 90
+// seconds, so without this a shoulder-surfed or replayed code works twice
+// (design-review §4.6).
+func (s *Server) totpSpend(user string, step int64) bool {
+	s.totpMu.Lock()
+	defer s.totpMu.Unlock()
+	if last, ok := s.totpLastStep[user]; ok && step <= last {
+		return false
+	}
+	s.totpLastStep[user] = step
+	return true
+}
+
+// limiterAddrKey buckets the login limiter by source address: IPv4 exactly,
+// IPv6 by /64. A single subscriber usually holds a whole /64, so keying on the
+// full address would let one attacker rotate addresses for unlimited tries
+// (design-review §4.6).
+func limiterAddrKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || !addr.Is6() || addr.Is4In6() {
+		return ip
+	}
+	p, err := addr.Prefix(64)
+	if err != nil {
+		return ip
+	}
+	return p.String()
+}
+
+// limiterUserKey namespaces the per-username bucket so it cannot collide with
+// an address bucket.
+func limiterUserKey(username string) string { return "user:" + username }
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		s.sessions.Delete(c.Value)
+	}
+	// A half-finished TOTP enrollment is session state, not config state: it
+	// must not survive the logout that abandoned it (design-review §4.8).
+	if user, ok := r.Context().Value(userKey{}).(string); ok {
+		s.totpMu.Lock()
+		delete(s.totpPending, user)
+		s.totpMu.Unlock()
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
@@ -366,6 +484,7 @@ type pageData struct {
 	Title  string
 	Active string
 	User   string // authenticated username, for the header
+	CSRF   string // per-session synchronizer token every form and htmx call carries
 	Nav    []Page
 	Cfg    config.Config
 	Stats  system.Stats
@@ -384,6 +503,8 @@ type pageData struct {
 	LogFilter logs.Filter
 
 	WGSessions map[string]string // WireGuard page: client ID -> last-seen text
+
+	Devices []devices.Device // Devices page only
 }
 
 func (s *Server) data(p Page, r *http.Request) pageData {
@@ -403,6 +524,9 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		d.Error = r.URL.Query().Get("err")
 		d.EditID = r.URL.Query().Get("edit")
 		d.User, _ = r.Context().Value(userKey{}).(string)
+		if c, err := r.Cookie(sessionCookie); err == nil {
+			d.CSRF, _ = s.sessions.CSRF(c.Value)
+		}
 		for _, u := range d.Cfg.Users {
 			if u.Username == d.User {
 				d.TOTPEnrolled = u.TOTPSecret != ""
@@ -419,6 +543,9 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 	if p.Path == "/wireguard" {
 		d.WGSessions = s.wgSessions(d.Cfg)
 	}
+	if p.Path == "/devices" {
+		d.Devices = s.deviceTable(d.Cfg)
+	}
 	if p.Path == "/logs" && r != nil {
 		d.LogFilter = logs.Filter{
 			Source:   r.URL.Query().Get("source"),
@@ -430,6 +557,23 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		}
 	}
 	return d
+}
+
+// deviceTable joins the durable device registry with the live ARP/NDP and DHCP
+// views and the flow store's per-host usage (internal/devices). Every input is
+// read at request time and nothing is cached: the neighbor tables are the
+// answer to "who is here now", and a stale answer is worse than a slow one.
+// Sources that are missing (a dev box with no arp, an appliance with no leases
+// yet) simply contribute nothing.
+func (s *Server) deviceTable(cfg config.Config) []devices.Device {
+	var totals map[string]flow.Talker
+	if s.flow != nil {
+		var err error
+		if totals, err = s.flow.HostTotals(deviceUsageRange); err != nil {
+			log.Printf("device usage: %v", err) // usage columns render as zero
+		}
+	}
+	return devices.Build(cfg, totals, devices.DefaultSources(cfg))
 }
 
 // handleLogsPartial serves the table fragment the Logs page polls, keeping
@@ -643,6 +787,16 @@ func (s *Server) handleSetHostname(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	redirect(w, r, "/system", err)
+}
+
+// humanCount is humanBytes for the signed counters the flow store returns
+// (Devices page). Template functions match argument types exactly, so the
+// conversion has to live somewhere; here beats duplicating the formatter.
+func humanCount(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	return humanBytes(uint64(n))
 }
 
 func humanBytes(b uint64) string {

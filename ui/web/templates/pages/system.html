@@ -2,6 +2,7 @@
 <h1>System</h1>
 <h2>Identification</h2>
 <form method="post" action="/system/hostname">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Hostname
     <input name="hostname" value="{{.Cfg.System.Hostname}}" required>
   </label>
@@ -9,6 +10,7 @@
 </form>
 <h2>Time</h2>
 <form method="post" action="/system/time" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Timezone
     <select name="timezone">
       {{$tz := .Cfg.System.Timezone}}
@@ -29,9 +31,10 @@
       <td><span id="ntptest-{{$i}}" class="muted">—</span></td>
       <td class="actions">
         <button type="button" class="secondary"
-                hx-get="/system/ntp/test?server={{urlquery $n}}"
+                hx-post="/system/ntp/test?server={{urlquery $n}}"
                 hx-target="#ntptest-{{$i}}" hx-swap="innerHTML">Test</button>
         <form method="post" action="/system/ntp/servers/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="hidden" name="server" value="{{$n}}">
           <button type="submit" class="danger">Remove</button>
         </form>
@@ -41,6 +44,7 @@
   </tbody>
 </table>
 <form method="post" action="/system/ntp/servers" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>NTP server <input name="server" placeholder="pool.ntp.org" required></label>
   <button type="submit">Add</button>
 </form>
@@ -48,6 +52,7 @@
 <h2>Apply</h2>
 {{if not .ApplyPending}}
 <form method="post" action="/system/apply">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <button type="submit">Apply configuration</button>
   <span class="muted">Validates, installs, and reloads services; rolls back automatically unless confirmed within the window.</span>
 </form>
@@ -60,6 +65,7 @@
   <span class="muted">— the complete appliance config, including credentials and keys. Store it safely.</span>
 </p>
 <form method="post" action="/system/restore" enctype="multipart/form-data" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <input type="file" name="backup" accept="application/json" required>
   <button type="submit" class="danger">Restore</button>
   <span class="muted">Replaces the entire config; apply afterwards to take effect.</span>
@@ -76,6 +82,7 @@
       <td class="actions">
         {{if eq .Username $.EditID}}
         <form method="post" action="/system/users/{{.Username}}/password" class="row-form">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="password" name="password" placeholder="new password" minlength="8" required>
           <input type="password" name="confirm" placeholder="confirm" minlength="8" required>
           <button type="submit">Set password</button>
@@ -84,6 +91,7 @@
         {{else}}
         <a href="/system?edit={{.Username}}" class="button-link">Change password</a>
         <form method="post" action="/system/users/{{.Username}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="danger">Delete</button>
         </form>
         {{end}}
@@ -94,6 +102,7 @@
 </table>
 <h3>Add user</h3>
 <form method="post" action="/system/users" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Username <input name="username" required></label>
   <label>Password <input type="password" name="password" minlength="8" required></label>
   <button type="submit">Add</button>
@@ -102,6 +111,7 @@
 <h2>Two-factor authentication ({{.User}})</h2>
 {{if .TOTPEnrolled}}
 <form method="post" action="/system/totp/disable" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <span class="ok">TOTP is active for your account.</span>
   <button type="submit" class="danger">Disable</button>
 </form>
@@ -109,11 +119,13 @@
 <p>Scan with your authenticator app, then enter the current code to finish enrollment:</p>
 <p><img src="/system/totp/qr.png" alt="TOTP enrollment QR" width="256" height="256"></p>
 <form method="post" action="/system/totp/confirm" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <input name="code" inputmode="numeric" pattern="[0-9]*" placeholder="123456" required>
   <button type="submit">Confirm</button>
 </form>
 {{else}}
 <form method="post" action="/system/totp/begin" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <button type="submit">Enroll TOTP</button>
   <span class="muted">Adds a 6-digit authenticator code to your login.</span>
 </form>
@@ -126,6 +138,7 @@
   is audited.
 </p>
 <form method="post" action="/system/shell" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label class="check">
     <input type="checkbox" name="enabled" {{if .Cfg.Shell.Enabled}}checked{{end}}>
     Enable web shell
@@ -137,6 +150,7 @@
 {{$m := .Cfg.SMTP}}
 <p class="muted">Outbound mail relay, used to email WireGuard client configs and (later) status and alert notifications. Leave the host blank to disable email.</p>
 <form method="post" action="/system/smtp" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Host <input name="host" value="{{$m.Host}}" size="20" placeholder="smtp.example.com"></label>
   <label>Port <input name="port" value="{{if $m.Port}}{{$m.Port}}{{end}}" size="6" placeholder="587"></label>
   <label>Security
@@ -148,7 +162,9 @@
   </label>
   <label>From <input name="from" value="{{$m.From}}" size="22" placeholder="firewall@example.com"></label>
   <label>Username <input name="username" value="{{$m.Username}}" size="16" placeholder="optional"></label>
-  <label>Password <input name="password" type="password" value="{{$m.Password}}" size="16" placeholder="optional"></label>
+  <!-- Never echo the stored password back into the page; blank means "keep it". -->
+  <label>Password <input name="password" type="password" size="16" autocomplete="new-password"
+    placeholder="{{if $m.Password}}unchanged{{else}}optional{{end}}"></label>
   <button type="submit">Save</button>
 </form>
 

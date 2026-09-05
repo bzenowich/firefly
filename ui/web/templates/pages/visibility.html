@@ -9,6 +9,7 @@
 
 <h2>Flows <span class="muted">(baseline)</span></h2>
 <form method="post" action="/flow/settings" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label class="check">
     <input type="checkbox" name="enabled" {{if .Cfg.Flow.Enabled}}checked{{end}}> Enabled
   </label>
@@ -62,6 +63,7 @@
   baseline — enable only when you need the forensic deep-dive.
 </p>
 <form method="post" action="/visibility/settings" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label class="check">
     <input type="checkbox" name="enabled" {{if .Cfg.Visibility.Enabled}}checked{{end}}> Enabled
   </label>

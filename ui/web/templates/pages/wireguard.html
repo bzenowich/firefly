@@ -2,6 +2,7 @@
 <h1>WireGuard</h1>
 
 <form method="post" action="/wireguard/settings" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label class="check"><input type="checkbox" name="enabled" {{if .Cfg.WireGuard.Enabled}}checked{{end}}> Enabled</label>
   <button type="submit">Save</button>
 </form>
@@ -9,6 +10,7 @@
 {{$srv := .Cfg.WireGuard.Server}}
 <h2>Remote-access server</h2>
 <form method="post" action="/wireguard/server" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label class="check"><input type="checkbox" name="enabled" {{if $srv.Enabled}}checked{{end}}> Enabled</label>
   <label>Tunnel address <input name="address" value="{{$srv.Address}}" size="18" placeholder="10.9.0.1/24"></label>
   <label>Listen port <input name="listen_port" value="{{if $srv.ListenPort}}{{$srv.ListenPort}}{{end}}" size="6" placeholder="51820"></label>
@@ -41,9 +43,11 @@
         <a href="/wireguard/server/clients/{{$c.ID}}/config" class="button-link">Config</a>
         <a href="/wireguard/server/clients/{{$c.ID}}/qr.png" class="button-link">QR</a>
         <form method="post" action="/wireguard/server/clients/{{$c.ID}}/email">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" {{if not $.Cfg.SMTP.Enabled}}disabled title="configure SMTP on the System page"{{end}}>Email</button>
         </form>
         <form method="post" action="/wireguard/server/clients/{{$c.ID}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="danger">Delete</button>
         </form>
       </td>
@@ -56,6 +60,7 @@
 {{end}}
 <h4>Add client</h4>
 <form method="post" action="/wireguard/server/clients" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Email <input name="email" type="email" placeholder="user@example.com" required></label>
   <button type="submit">Add</button>
 </form>
@@ -69,6 +74,7 @@
 <h2>{{.Name}} · {{.Address}} · :{{.ListenPort}}</h2>
 {{if eq .Name $.EditID}}
 <form method="post" action="/wireguard/tunnels/{{.Name}}" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Address <input name="address" value="{{.Address}}" size="18" required></label>
   <label>Port <input name="listen_port" value="{{.ListenPort}}" size="6" required></label>
   <label>Public endpoint <input name="endpoint_host" value="{{.EndpointHost}}" size="22" placeholder="vpn.example.com"></label>
@@ -80,6 +86,7 @@
   {{if .EndpointHost}}<span class="muted">endpoint {{.EndpointHost}}</span>{{else}}<span class="muted">no public endpoint set — client configs omit Endpoint</span>{{end}}
   <a href="/wireguard?edit={{.Name}}" class="button-link">Edit</a>
   <form method="post" action="/wireguard/tunnels/{{.Name}}/delete">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
     <button type="submit" class="danger">Delete tunnel</button>
   </form>
 </p>
@@ -102,6 +109,7 @@
         <a href="/wireguard/tunnels/{{$t.Name}}/peers/{{.Name}}/qr.png" class="button-link">QR</a>
         {{end}}
         <form method="post" action="/wireguard/tunnels/{{$t.Name}}/peers/{{.Name}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="danger">Delete</button>
         </form>
       </td>
@@ -115,6 +123,7 @@
 
 <h3>Add peer to {{.Name}}</h3>
 <form method="post" action="/wireguard/tunnels/{{.Name}}/peers" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Name <input name="name" placeholder="phone" required></label>
   <label>Allowed IPs <input name="allowed_ips" size="18" placeholder="10.8.0.2/32" required></label>
   <label>Public key <input name="public_key" size="20" placeholder="blank = generate"></label>
@@ -127,6 +136,7 @@
 
 <h2>Add tunnel</h2>
 <form method="post" action="/wireguard/tunnels" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Name <input name="name" placeholder="wg0" required></label>
   <label>Address <input name="address" size="18" placeholder="10.8.0.1/24" required></label>
   <label>Port <input name="listen_port" size="6" placeholder="51820" required></label>

@@ -1,0 +1,49 @@
+{{define "content"}}
+<h1>Devices</h1>
+<p class="muted">
+  Everything on the network as the appliance currently sees it: the ARP and NDP
+  neighbor tables joined with DHCP leases by MAC address, and the last day of
+  flow data attributed to whichever addresses each device holds. The MAC is the
+  identity — it survives DHCP churn and ties a device's v4 and v6 addresses
+  together. Naming devices is registry state (<span class="mono">devices</span>
+  in the config document); this view is read-only.
+</p>
+<table class="flow-table">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>MAC</th>
+      <th>Addresses</th>
+      <th>Status</th>
+      <th class="num">In</th>
+      <th class="num">Out</th>
+      <th class="num">Packets</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Devices}}
+    <tr>
+      <td>
+        {{if .Name}}{{.Name}}{{else}}<span class="muted">unnamed</span>{{end}}
+        {{if .Static}} <span class="muted">· reserved</span>{{end}}
+        {{if .Note}}<div class="muted">{{.Note}}</div>{{end}}
+      </td>
+      <td class="mono">{{.MAC}}</td>
+      <td class="mono">
+        {{range .IPs}}<div>{{.}}</div>{{end}}
+        {{if not .IPs}}<span class="muted">—</span>{{end}}
+      </td>
+      <td>{{if .Online}}<span class="ok">online</span>{{else}}<span class="muted">offline</span>{{end}}</td>
+      <td class="num">{{humanCount .In}}</td>
+      <td class="num">{{humanCount .Out}}</td>
+      <td class="num">{{.Pkts}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="7" class="muted">
+      Nothing seen yet. Devices appear once they take a DHCP lease or answer an
+      ARP/NDP query on an interface the appliance serves.
+    </td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

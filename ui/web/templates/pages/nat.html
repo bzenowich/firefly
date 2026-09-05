@@ -13,6 +13,7 @@
     <tr>
       <td colspan="6">
         <form method="post" action="/nat/forwards/{{.ID}}" class="row-form">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input name="name" value="{{.Name}}" placeholder="name" required>
           <input name="wan_port" value="{{.WANPort}}" size="6" required>
           <select name="service_id" required>
@@ -35,9 +36,11 @@
       <td class="actions">
         <a href="/nat?edit={{.ID}}" class="button-link">Edit</a>
         <form method="post" action="/nat/forwards/{{.ID}}/toggle">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="secondary">{{if .Enabled}}Disable{{else}}Enable{{end}}</button>
         </form>
         <form method="post" action="/nat/forwards/{{.ID}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="danger">Delete</button>
         </form>
       </td>
@@ -53,6 +56,7 @@
 <h2>Add port forward</h2>
 {{if .Cfg.Services}}
 <form method="post" action="/nat/forwards" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Name <input name="name" placeholder="web server" required></label>
   <label>WAN port <input name="wan_port" size="6" placeholder="443" required></label>
   <label>Service

@@ -6,6 +6,7 @@
 {{if eq .Role "wan"}}
 <h2>WAN <span class="muted">· {{.Device}}</span></h2>
 <form method="post" action="/interfaces/{{.Name}}/address" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Device <input name="device" value="{{.Device}}" size="8" required></label>
   <label>Addressing
     <select name="mode">
@@ -29,9 +30,10 @@
       <td><span id="dnstest-{{$i}}" class="muted">—</span></td>
       <td class="actions">
         <button type="button" class="secondary"
-                hx-get="/system/dns/test?address={{urlquery $d.Address}}&amp;hostname={{urlquery $d.Hostname}}"
+                hx-post="/system/dns/test?address={{urlquery $d.Address}}&amp;hostname={{urlquery $d.Hostname}}"
                 hx-target="#dnstest-{{$i}}" hx-swap="innerHTML">Test</button>
         <form method="post" action="/system/dns/servers/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="hidden" name="address" value="{{$d.Address}}">
           <button type="submit" class="danger">Remove</button>
         </form>
@@ -41,6 +43,7 @@
   </tbody>
 </table>
 <form method="post" action="/system/dns/servers" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Address <input name="address" placeholder="1.1.1.1" required></label>
   <label>TLS hostname <input name="hostname" placeholder="cloudflare-dns.com (optional)" size="22"></label>
   <button type="submit">Add</button>
@@ -54,6 +57,7 @@
 {{$d := $.Cfg.DHCPFor .Name}}
 <h2>{{.Name}} <span class="muted">· {{.Device}}{{if .IPv4}} · {{.IPv4}}{{end}}</span></h2>
 <form method="post" action="/interfaces/{{$if.Name}}/address" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Device <input name="device" value="{{$if.Device}}" size="8" required></label>
   <label>Static IP <input name="ipv4" value="{{$if.IPv4}}" size="18" placeholder="192.168.1.1/24" required></label>
   <button type="submit">Save</button>
@@ -62,6 +66,7 @@
 {{if $if.IPv4}}
 <h3>DHCP server</h3>
 <form method="post" action="/interfaces/{{$if.Name}}/dhcp" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label class="check"><input type="checkbox" name="enabled" {{if $d.Enabled}}checked{{end}}> Enabled</label>
   <label>Pool start <input name="range_start" value="{{$d.RangeStart}}" size="15" required></label>
   <label>Pool end <input name="range_end" value="{{$d.RangeEnd}}" size="15" required></label>
@@ -79,6 +84,7 @@
     <tr>
       <td colspan="4">
         <form method="post" action="/interfaces/{{$if.Name}}/leases/{{.MAC}}" class="row-form">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input name="mac" value="{{.MAC}}" size="17" required>
           <input name="ip" value="{{.IP}}" size="15" required>
           <input name="hostname" value="{{.Hostname}}" placeholder="hostname">
@@ -95,6 +101,7 @@
       <td class="actions">
         <a href="/interfaces?edit={{$if.Name}}:{{.MAC}}" class="button-link">Edit</a>
         <form method="post" action="/interfaces/{{$if.Name}}/leases/{{.MAC}}/delete">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <button type="submit" class="danger">Delete</button>
         </form>
       </td>
@@ -107,6 +114,7 @@
 <p class="muted">No static mappings configured.</p>
 {{end}}
 <form method="post" action="/interfaces/{{$if.Name}}/leases" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>MAC <input name="mac" size="17" placeholder="aa:bb:cc:dd:ee:ff" required></label>
   <label>IP <input name="ip" size="15" placeholder="address in subnet" required></label>
   <label>Hostname <input name="hostname" placeholder="printer"></label>

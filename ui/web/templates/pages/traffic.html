@@ -122,11 +122,22 @@
         card = document.createElement("div");
         card.className = "card chart-card";
         card.id = "chart-" + s.iface;
-        card.innerHTML =
-          '<h3>' + s.iface + ' ' +
-          '<span class="legend"><i style="background:' + COL.rx + '"></i>in ' +
-          '<i style="background:' + COL.tx + '"></i>out</span></h3>' +
-          '<canvas></canvas>';
+        // Built as DOM nodes rather than an innerHTML string: s.iface is
+        // kernel-sourced data, not markup, and a text node can never become
+        // one (design-review §4.8).
+        var h3 = document.createElement("h3");
+        h3.appendChild(document.createTextNode(s.iface + " "));
+        var legend = document.createElement("span");
+        legend.className = "legend";
+        [[COL.rx, "in "], [COL.tx, "out"]].forEach(function (pair) {
+          var swatch = document.createElement("i");
+          swatch.style.background = pair[0];
+          legend.appendChild(swatch);
+          legend.appendChild(document.createTextNode(pair[1]));
+        });
+        h3.appendChild(legend);
+        card.appendChild(h3);
+        card.appendChild(document.createElement("canvas"));
         box.appendChild(card);
       }
       draw(card.querySelector("canvas"), s, data.step, data.span);

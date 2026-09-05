@@ -18,10 +18,12 @@ import (
 )
 
 // client wraps a Server with the session cookie obtained from first-run
-// setup, since every route except /login and /setup requires auth.
+// setup, since every route except /login and /setup requires auth, plus that
+// session's CSRF token, which every non-GET request must carry.
 type client struct {
 	srv    *Server
 	cookie *http.Cookie
+	csrf   string
 }
 
 func newTestServer(t *testing.T) (*client, *config.Store) {
@@ -37,6 +39,7 @@ func newTestServer(t *testing.T) (*client, *config.Store) {
 	}
 	c := &client{srv: srv}
 	c.cookie = setup(t, srv)
+	c.csrf, _ = srv.sessions.CSRF(c.cookie.Value)
 	return c, store
 }
 
@@ -99,6 +102,7 @@ func (c *client) post(t *testing.T, path string, form url.Values) *url.URL {
 	t.Helper()
 	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(csrfHeader, c.csrf)
 	req.AddCookie(c.cookie)
 	w := httptest.NewRecorder()
 	c.srv.ServeHTTP(w, req)
@@ -249,6 +253,8 @@ func TestLoginLogout(t *testing.T) {
 
 	// Logout kills the session server-side.
 	req := httptest.NewRequest("POST", "/logout", nil)
+	csrf, _ := c.srv.sessions.CSRF(cookie.Value)
+	req.Header.Set(csrfHeader, csrf)
 	req.AddCookie(cookie)
 	c.srv.ServeHTTP(httptest.NewRecorder(), req)
 	req = httptest.NewRequest("GET", "/", nil)
@@ -262,8 +268,10 @@ func TestLoginLogout(t *testing.T) {
 
 func TestLoginRateLimit(t *testing.T) {
 	c, _ := newTestServer(t)
+	// Fail against a throwaway username so only the address bucket trips,
+	// isolating it from the per-username bucket.
 	for range loginMaxFails {
-		login(c.srv, "10.0.0.9:1234", "admin", "wrong")
+		login(c.srv, "10.0.0.9:1234", "nobody", "wrong")
 	}
 	// Even correct credentials are refused once the IP is locked out.
 	w := login(c.srv, "10.0.0.9:1234", "admin", "correct horse")
@@ -397,6 +405,7 @@ func TestApplyWritesFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &client{srv: srv, cookie: setup(t, srv)}
+	c.csrf, _ = srv.sessions.CSRF(c.cookie.Value)
 	c.post(t, "/system/apply", nil)
 	data, err := os.ReadFile(filepath.Join(root, "etc/pf.conf"))
 	if err != nil {
@@ -404,6 +413,32 @@ func TestApplyWritesFiles(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "block in log all") {
 		t.Error("installed pf.conf missing ruleset")
+	}
+}
+
+// TestCSRFRequired covers the synchronizer-token gate: a state-changing request
+// carrying a valid session cookie but no token is refused, and the handler
+// behind it never runs.
+func TestCSRFRequired(t *testing.T) {
+	c, store := newTestServer(t)
+
+	form := url.Values{"hostname": {"no-token"}}
+	req := httptest.NewRequest("POST", "/system/hostname", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(c.cookie)
+	w := httptest.NewRecorder()
+	c.srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("POST without token: status %d, want 403", w.Code)
+	}
+	if got := store.Get().System.Hostname; got == "no-token" {
+		t.Error("handler ran despite a missing CSRF token")
+	}
+
+	// The same request with the token goes through (c.post asserts the 303).
+	c.post(t, "/system/hostname", url.Values{"hostname": {"with-token"}})
+	if got := store.Get().System.Hostname; got != "with-token" {
+		t.Errorf("hostname after tokened post: %q", got)
 	}
 }
 

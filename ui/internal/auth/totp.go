@@ -49,26 +49,43 @@ func CurrentTOTP(secret string) (string, error) {
 // VerifyTOTP checks a 6-digit code against the secret, accepting one step of
 // clock skew either side.
 func VerifyTOTP(secret, code string) bool {
+	_, ok := VerifyTOTPStep(secret, code)
+	return ok
+}
+
+// VerifyTOTPStep is VerifyTOTP plus the time step the code matched. The ±1 step
+// skew window means one code stays valid for up to 90 seconds, so a login path
+// that must not accept the same code twice records the returned step and
+// refuses anything not strictly newer (design-review §4.6).
+func VerifyTOTPStep(secret, code string) (int64, bool) {
 	key, err := b32.DecodeString(strings.ToUpper(strings.TrimSpace(secret)))
 	if err != nil {
-		return false
+		return 0, false
 	}
 	code = strings.TrimSpace(code)
 	now := time.Now()
+	var step int64
 	ok := false
 	for skew := -1; skew <= 1; skew++ {
-		want := totpCode(key, now.Add(time.Duration(skew)*totpStep))
+		t := now.Add(time.Duration(skew) * totpStep)
+		want := totpCode(key, t)
 		// Check every window — no early exit — so timing stays uniform.
 		if subtle.ConstantTimeCompare([]byte(want), []byte(code)) == 1 {
-			ok = true
+			step, ok = stepNumber(t), true
 		}
 	}
-	return ok
+	return step, ok
+}
+
+// stepNumber is the RFC 6238 counter value for t: the number of whole steps
+// since the Unix epoch.
+func stepNumber(t time.Time) int64 {
+	return t.Unix() / int64(totpStep/time.Second)
 }
 
 func totpCode(key []byte, t time.Time) string {
 	var counter [8]byte
-	binary.BigEndian.PutUint64(counter[:], uint64(t.Unix())/uint64(totpStep/time.Second))
+	binary.BigEndian.PutUint64(counter[:], uint64(stepNumber(t)))
 	mac := hmac.New(sha1.New, key)
 	mac.Write(counter[:])
 	sum := mac.Sum(nil)
