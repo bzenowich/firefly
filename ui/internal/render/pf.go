@@ -6,6 +6,7 @@ package render
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"firewall/ui/internal/config"
@@ -81,14 +82,17 @@ func PF(cfg config.Config) (string, error) {
 	w("antispoof quick for $%s", macro(wan))
 	w("")
 
-	w("# LAN and OPT networks are trusted")
-	for _, ifc := range cfg.Interfaces {
-		if ifc.Role == "wan" || (ifc.IPv4 == "" && !ifc.DHCPClient) {
-			continue
-		}
-		w("pass in on $%s inet all %s", macro(ifc), keepState)
-	}
-	w("")
+	// Admin plane and per-segment trust (docs/security-plan.md SEC-5).
+	//
+	// This block used to be one line per interface — "LAN and OPT networks are
+	// trusted", pass everything — which meant two things worth separating. It
+	// meant every device on the LAN could reach the WebUI and sshd, which is a
+	// large surface for a service one person uses. And it meant OPT, the
+	// natural home for a guest or IoT segment, had full access to the LAN and
+	// to the firewall itself, which is the opposite of why anyone separates a
+	// segment.
+	writeManagementRules(&b, cfg, keepState)
+	writeSegmentRules(&b, cfg, keepState)
 
 	if len(enabled) > 0 {
 		w("# Port forwards (pass redirected traffic)")
@@ -163,6 +167,132 @@ func wgServerRules(b *strings.Builder, cfg config.Config, wan config.Interface) 
 		}
 	}
 	w("")
+}
+
+// writeManagementRules emits the admin-plane policy: the WebUI and sshd are
+// reachable only from the configured sources, and blocked from everywhere else
+// on every interface.
+//
+// The block is `quick` and comes first so it wins over the segment passes
+// below. Ordering it the other way round would let a trusted-segment pass
+// admit management traffic before the block was ever consulted — the classic
+// way a management ACL ends up decorative.
+func writeManagementRules(b *strings.Builder, cfg config.Config, keepState string) {
+	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+	ports := cfg.System.Management.ManagementPorts()
+	if len(ports) == 0 {
+		return
+	}
+	portList := pfPortList(ports)
+
+	w("# Admin plane: the WebUI and sshd.")
+	sources := cfg.System.Management.Sources
+	if len(sources) == 0 {
+		// Default: the LAN, which is what the appliance did before this policy
+		// existed. Narrowing it on upgrade would risk locking an admin out of
+		// their own firewall, which is worse than the exposure it closes.
+		if lan, ok := byRole(cfg, "lan"); ok {
+			w("# No explicit sources configured, so the whole LAN may manage the box.")
+			w("pass in quick on $%s inet proto tcp from $%s:network to (self) port %s %s",
+				macro(lan), macro(lan), portList, keepState)
+		}
+	} else {
+		w("management_sources = \"{ %s }\"", strings.Join(sources, " "))
+		// One pass per non-WAN interface, never a bare `pass in quick`.
+		//
+		// An interface-agnostic rule would mean a source list containing a
+		// public prefix — a mistake, or a restored backup — opens the WebUI on
+		// the WAN. The admin plane should not be reachable from the internet
+		// whatever the list says, so the ruleset does not offer the option.
+		for _, ifc := range cfg.Interfaces {
+			if ifc.Role == "wan" {
+				continue
+			}
+			w("pass in quick on $%s inet proto tcp from $management_sources to (self) port %s %s",
+				macro(ifc), portList, keepState)
+		}
+	}
+	// Everything else, on every interface including the ones passed as trusted
+	// below.
+	w("block in log quick inet proto tcp to (self) port %s", portList)
+	w("")
+}
+
+// writeSegmentRules emits one block per non-WAN interface according to its
+// trust level.
+func writeSegmentRules(b *strings.Builder, cfg config.Config, keepState string) {
+	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+
+	for _, ifc := range cfg.Interfaces {
+		if ifc.Role == "wan" || (ifc.IPv4 == "" && !ifc.DHCPClient) {
+			continue
+		}
+		switch ifc.TrustLevel() {
+		case config.TrustTrusted:
+			w("# %s (trusted): full access.", ifc.Name)
+			w("pass in on $%s inet all %s", macro(ifc), keepState)
+
+		case config.TrustGuest:
+			// Appliance services, then the internet, then nothing else. The
+			// order matters: the block is quick, so it must come after the
+			// passes it is meant to leave alone.
+			w("# %s (guest): appliance services and the internet, not the LAN.", ifc.Name)
+			w("pass in quick on $%s inet proto { tcp udp } from $%s:network to (self) port { 53 67 123 } %s",
+				macro(ifc), macro(ifc), keepState)
+			w("pass in quick on $%s inet proto icmp from $%s:network to (self) icmp-type echoreq %s",
+				macro(ifc), macro(ifc), keepState)
+			writeNoLocalRule(w, cfg, ifc)
+			w("pass in on $%s inet from $%s:network to any %s", macro(ifc), macro(ifc), keepState)
+
+		case config.TrustIsolated:
+			// DHCP only, because a host that cannot get a lease cannot use the
+			// segment at all. Everything else on the box is closed, and hosts
+			// on the segment cannot reach each other either.
+			w("# %s (isolated): DHCP and the internet only.", ifc.Name)
+			w("pass in quick on $%s inet proto udp from any to (self) port 67 %s", macro(ifc), keepState)
+			w("block in quick on $%s inet from $%s:network to $%s:network",
+				macro(ifc), macro(ifc), macro(ifc))
+			writeNoLocalRule(w, cfg, ifc)
+			w("pass in on $%s inet from $%s:network to any %s", macro(ifc), macro(ifc), keepState)
+		}
+		w("")
+	}
+}
+
+// writeNoLocalRule blocks a segment from reaching the appliance itself and
+// every other configured subnet, leaving only the route out.
+//
+// Naming the other subnets explicitly rather than relying on RFC1918 lists:
+// the appliance knows exactly which networks it serves, and a hand-maintained
+// private-address list is how a segment ends up with a hole in it the day
+// someone renumbers.
+func writeNoLocalRule(w func(string, ...any), cfg config.Config, from config.Interface) {
+	var nets []string
+	nets = append(nets, "(self)")
+	for _, other := range cfg.Interfaces {
+		if other.Name == from.Name || other.Role == "wan" {
+			continue
+		}
+		if other.IPv4 == "" && !other.DHCPClient {
+			continue
+		}
+		nets = append(nets, "$"+macro(other)+":network")
+	}
+	w("block in log quick on $%s inet from $%s:network to { %s }",
+		macro(from), macro(from), strings.Join(nets, " "))
+}
+
+// pfPortList renders a port list for a pf rule: a bare number when there is
+// one, a braced set otherwise.
+func pfPortList(ports []int) string {
+	if len(ports) == 1 {
+		return strconv.Itoa(ports[0])
+	}
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		parts = append(parts, strconv.Itoa(p))
+	}
+	return "{ " + strings.Join(parts, " ") + " }"
 }
 
 func byRole(cfg config.Config, role string) (config.Interface, bool) {

@@ -24,7 +24,16 @@ load_rc_config $name
 
 : ${fwd_enable:="NO"}
 : ${fwd_config:="/conf/config.json"}
-: ${fwd_listen:="0.0.0.0:8443"}
+# The address fwd binds. "auto" resolves to the LAN address from the config
+# document, so the WebUI is not listening on the WAN at all
+# (docs/security-plan.md SEC-5).
+#
+# It was 0.0.0.0, which meant the admin UI was bound on every interface
+# including the WAN and was invisible from outside only because pf happened to
+# block it first. One misordered rule, one `pfctl -d`, one bad apply inside the
+# rollback window, and it is on the internet. Not binding it there at all is a
+# property of the process rather than of the ruleset.
+: ${fwd_listen:="auto"}
 : ${fwd_data:="/var/db/fwd"}
 : ${fwd_log:="/var/log/fwd.log"}
 

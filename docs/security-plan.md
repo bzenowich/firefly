@@ -912,32 +912,108 @@ process from this project (`fwd-helper`); `fwd`, `ndpi-helper` and the PTY are
 not root; an apply, a confirm, a rollback, a shell session and a WireGuard peer
 listing all work through the socket.
 
-### Phase S2 — Sandbox and segmentation (weeks)
+### Phase S2 — Sandbox and segmentation — **DONE 2026-09-05**
 
-- [ ] **SEC-2a** — `ndpi-helper` drops to `_fwdpcap`, verifies the drop, exits
-      on failure; Capsicum investigated
-- [ ] **SEC-5** — management-access allowlist, interface trust levels, bind
-      `fwd` to the LAN address, IPv6 rule-parity plan
-- [ ] **SEC-14** — peer-uid checks on the label socket; localhost trust
-      assumption documented
+- [x] **SEC-2a** — the drop landed with §3.5 step 5. **Capsicum: investigated,
+      not adopted.** `unix.CapEnter` is available for FreeBSD in `x/sys`, and
+      the process is a good candidate — after `pcap_activate` it needs no
+      namespace at all. It is blocked by one design detail: the label sink
+      *dials lazily and redials under backoff*, and capability mode forbids
+      `connect()` by path. Adopting it therefore means connecting eagerly and
+      **exiting on disconnect** so rc restarts the process, which trades a
+      transparent fwd restart for a classifier restart. Two things also remain
+      unknown without hardware: whether libnDPI opens any file after
+      initialisation, and whether the Go runtime does. Shipping an unverified
+      `cap_enter` into the default path risks silently killing app labels, so
+      it stays out until it can be run on the box. Tracked as S4.
+- [x] **SEC-5** — management-access allowlist, interface trust levels, and
+      `fwd` binding the LAN address rather than `0.0.0.0`.
 
-**Exit:** an OPT-segment host cannot reach the LAN or the admin UI; a shell as
-`nobody` cannot reach ntopng or forge flow records.
+      One hole was introduced and caught during review: the first version of
+      the management rule was interface-agnostic, so a source list containing a
+      public prefix — a mistake, or a restored backup — would have opened the
+      WebUI **on the WAN**. It is now emitted per non-WAN interface, so the
+      ruleset does not offer that option whatever the list says, and
+      `/system/management` is behind the re-auth gate because widening the
+      admin plane is the first thing someone holding a stolen session would do.
+- [x] **SEC-14** — peer-uid check on the label socket (landed with step 5), and
+      the IPFIX collector now refuses datagrams from anything but the local
+      exporter, with a counter so a non-zero value is visible.
 
-### Phase S3 — Account and operational security (weeks)
+**Exit — met, and checked against a real `pfctl`.** All four rulesets (default,
+guest, isolated, explicit management sources) parse clean on FreeBSD 15.1, and
+`pfctl -nvf` expands them the way the policy intends:
 
-- [ ] **SEC-6** — re-authentication gate with an elevated-session window
-- [ ] **SEC-9** — console setup token
-- [ ] **SEC-10** — audit log with its own retention, surfaced on the Logs page
-- [ ] **SEC-11** — absolute session lifetime, session inventory, revoke-all
-- [ ] **SEC-12** — limiter backoff instead of lockout; bounded map
-- [ ] **SEC-13** — label/hostname charset limits at ingest; DOM construction on
-      the Visibility page
-- [ ] **SEC-15** — double-submit cookie on `/login`
-- [ ] **SEC-17** — cert regeneration on identity change, cipher policy, fixed
-      redirect target
+```
+# guest
+pass  in quick on vtnet2 ... to (self) port = domain|bootps|ntp
+pass  in quick on vtnet2 ... icmp-type echoreq
+block in log quick on vtnet2 from 192.168.9.0/24 to (self)
+block in log quick on vtnet2 from 192.168.9.0/24 to 10.0.2.0/24
+block in log quick on vtnet2 from 192.168.9.0/24 to 192.168.1.0/24
+pass  in       on vtnet2 from 192.168.9.0/24 to any
+
+# isolated adds
+block in quick on vtnet2 from 192.168.9.0/24 to 192.168.9.0/24
+```
+
+The ordering is the part worth checking on a real parser rather than in a
+string comparison: the blocks are `quick` and precede the pass-to-any, so the
+route out cannot re-open what they closed. The admin-plane block likewise
+expands to `block drop in log quick inet proto tcp from any to (self) port =
+8443` sitting ahead of every segment pass.
+
+What is still untested is behavioural rather than syntactic: no packet has been
+sent from a guest segment to the LAN. That needs two hosts on two segments and
+is on the `docs/hw-bringup.md` list.
+
+**IPv6 rule parity — still a plan, not code.** Every rule the renderer emits is
+`inet`. That is fail-closed today (v6 forwarding is simply blocked), so it is
+not a hole; it is a prerequisite. Whoever adds IPv6 has to add a v6 twin for
+each of the segment blocks above, plus ICMPv6 and DHCPv6, or the segmentation
+becomes v4-theatre the day it lands. Kept in S4 with that framing rather than
+listed as done.
+
+### Phase S3 — Account and operational security — **DONE 2026-09-05**
+
+- [x] **SEC-6** — a re-authentication gate with a 5-minute per-session window,
+      applied by consequence rather than by verb: everything that changes who
+      can log in, plus `GET /system/backup`, which is a download but what it
+      downloads is every secret on the box. It re-checks the second factor too,
+      because someone holding a stolen cookie may also know the password.
+- [x] **SEC-9** — a console setup token, required once. 80 bits from an
+      alphabet with no `I`/`L`/`O`/`U`/`0`/`1`, so it survives being read off a
+      serial console. Rate-limited on the login bucket, and an *absent* token is
+      treated as "accept nothing" rather than "accept anything".
+- [x] **SEC-10** — an audit trail in its own table with its own retention.
+      Separate from the log ring on purpose: the ring is trimmed by whatever is
+      chattiest, and on a firewall that is pf — an audit trail a port scan can
+      erase is not an audit trail. Surfaced as a source on the Logs page.
+- [x] **SEC-11** — an absolute 24 h lifetime alongside the idle TTL, a session
+      inventory with source and last-seen, per-session revoke and "sign out
+      everywhere else". Inventory ids are hashes, never token prefixes: a
+      prefix of a bearer token is a partial credential.
+- [x] **SEC-12** — the username bucket became an escalating capped delay rather
+      than a refusal. The address bucket keeps its hard cap. The map is bounded
+      with coldest-first eviction, so a username spray cannot flush the entry
+      tracking a real attack.
+- [x] **SEC-13** — app labels are constrained at ingest (`flow.SanitizeApp`),
+      and the Visibility page builds rows as DOM nodes instead of HTML strings.
+      The old hand-rolled escaper covered `&<>`, which is correct for text
+      position and silently is not the moment a value moves into an attribute.
+- [x] **SEC-15** — a pre-session double-submit cookie on `/login` and `/setup`.
+- [x] **SEC-17** — the certificate regenerates when the hostname or LAN address
+      moves out from under it (an admin trained to click through a warning on
+      their own firewall will click through a real one), an explicit
+      forward-secret AEAD cipher list, and the HTTP→HTTPS redirect now targets
+      the appliance's own address rather than echoing the client's `Host`.
 
 ### Phase S4 — Deferred, tracked
+
+- [ ] **Capsicum for `ndpi-helper`** — see S2 above for what blocks it and what
+      would have to change. Needs the box.
+- [ ] **IPv6 rule parity** — a prerequisite of any IPv6 support, not of
+      shipping v4.
 
 - [ ] **SEC-7** — roles. Wanted, but it touches every handler and is better done
       once the handler set stops moving.

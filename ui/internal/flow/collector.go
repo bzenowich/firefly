@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,9 @@ type Collector struct {
 	dec   *Decoder
 	addr  string
 	cache *LabelCache // app labels from the ndpi-helper; nil disables enrichment
+
+	// rejected counts datagrams from anything but the local exporter.
+	rejected atomic.Uint64
 }
 
 func NewCollector(store *Store, addr string) *Collector {
@@ -43,6 +47,11 @@ func NewCollector(store *Store, addr string) *Collector {
 
 // WithLabels enables app-layer enrichment: flows are stamped from cache at
 // insert (design §5, path 1). The same cache is fed by a LabelServer.
+// Rejected reports how many datagrams were dropped for arriving from somewhere
+// other than the local exporter. A non-zero count means something on this box
+// is writing to the collector that should not be.
+func (c *Collector) Rejected() uint64 { return c.rejected.Load() }
+
 func (c *Collector) WithLabels(cache *LabelCache) *Collector {
 	c.cache = cache
 	return c
@@ -74,7 +83,7 @@ func (c *Collector) Run(ctx context.Context) error {
 			return nil
 		}
 		pc.SetReadDeadline(time.Now().Add(time.Second))
-		n, _, err := pc.ReadFrom(buf)
+		n, from, err := pc.ReadFrom(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -85,8 +94,27 @@ func (c *Collector) Run(ctx context.Context) error {
 			log.Printf("flow: read: %v", err)
 			continue
 		}
+		// The exporter is the kernel's pflow(4), sending from the loopback
+		// address the rendered rc.d script configures. Anything else is another
+		// local process — after the privilege split that includes the web-shell
+		// account, unbound and kea — and what it would be doing is writing
+		// fabricated flow records into the Visibility page and the device usage
+		// table (docs/security-plan.md SEC-14).
+		//
+		// Localhost is a trust boundary on a box with more than one uid on it,
+		// and it stops being one the moment anything assumes otherwise.
+		if !fromLoopback(from) {
+			c.rejected.Add(1)
+			continue
+		}
 		c.ingest(buf[:n])
 	}
+}
+
+// fromLoopback reports whether a datagram came from the local host.
+func fromLoopback(from net.Addr) bool {
+	ua, ok := from.(*net.UDPAddr)
+	return ok && ua.IP != nil && ua.IP.IsLoopback()
 }
 
 // ingest decodes one datagram and stores the flows it carried, dropping records

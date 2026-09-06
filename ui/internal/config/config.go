@@ -230,6 +230,8 @@ type System struct {
 	// addresses only: ntp.conf's server directive takes no port, so one is
 	// rejected rather than silently dropped (render.NTP).
 	NTPServers []string `json:"ntp_servers,omitempty"`
+	// Management restricts who may reach the WebUI and sshd (SEC-5).
+	Management Management `json:"management,omitempty"`
 }
 
 // DNSServer is one upstream resolver. Address is the IP; Hostname, when set,
@@ -289,6 +291,43 @@ type Interface struct {
 	HardwareOffload bool `json:"hardware_offload,omitempty"`
 	// MTU overrides the interface MTU; 0 leaves the driver default.
 	MTU int `json:"mtu,omitempty"`
+	// Trust is the segment's access to the rest of the appliance
+	// (docs/security-plan.md SEC-5). Empty means TrustTrusted, which is what
+	// every interface behaved as before this existed.
+	Trust string `json:"trust,omitempty"`
+}
+
+// Interface trust levels.
+//
+// pf previously emitted "pass in on $if inet all" for the LAN *and* for every
+// OPT interface, under a comment calling them trusted. That made OPT — the
+// natural home for a guest or IoT segment — a network with full access to the
+// LAN and to the firewall itself, which is the opposite of why someone
+// separates a segment in the first place.
+//
+// The levels are ordered by what they can reach:
+//
+//	trusted   the LAN: everything, including the admin UI (subject to
+//	          Management below)
+//	guest     the internet and appliance services (DNS, DHCP), but not the
+//	          LAN and not the admin UI
+//	isolated  the internet only: no appliance services beyond DHCP, no LAN,
+//	          no admin UI, and no other isolated host
+const (
+	TrustTrusted  = "trusted"
+	TrustGuest    = "guest"
+	TrustIsolated = "isolated"
+)
+
+// TrustLevel returns the effective trust for an interface, defaulting to
+// trusted so an existing config document behaves exactly as it did.
+func (i Interface) TrustLevel() string {
+	switch i.Trust {
+	case TrustGuest, TrustIsolated:
+		return i.Trust
+	default:
+		return TrustTrusted
+	}
 }
 
 // ServesDHCP reports whether an interface can host a DHCP server: any non-WAN
@@ -528,6 +567,9 @@ func (c *Config) Validate() error {
 	if err := c.validateSystem(); err != nil {
 		return err
 	}
+	if err := c.validateManagement(); err != nil {
+		return err
+	}
 	roles := map[string]int{}
 	for _, ifc := range c.Interfaces {
 		switch ifc.Role {
@@ -596,6 +638,46 @@ func (c *Config) validateDevices() error {
 			return fmt.Errorf("device %s: duplicate mac", mac)
 		}
 		seen[mac] = true
+	}
+	return nil
+}
+
+// Management is the admin plane policy (docs/security-plan.md SEC-5).
+//
+// Before this, the rendered ruleset passed everything on the LAN, so every
+// device on it — a thermostat, a TV, a guest's laptop — could reach the WebUI
+// and sshd. That is a large attack surface for a service only one person uses,
+// and it is the surface every credential attack starts against.
+type Management struct {
+	// Sources restricts who may reach the admin plane. Empty means the whole
+	// LAN, which is the pre-existing behaviour and the safe default to migrate
+	// to: locking an admin out of their own firewall on upgrade would be worse
+	// than the exposure it closes.
+	Sources []string `json:"sources,omitempty"`
+	// Ports is the admin plane itself. Defaults to the WebUI and SSH.
+	Ports []int `json:"ports,omitempty"`
+}
+
+// ManagementPorts returns the effective admin-plane port list.
+func (m Management) ManagementPorts() []int {
+	if len(m.Ports) > 0 {
+		return m.Ports
+	}
+	return []int{8443, 22}
+}
+
+func (c *Config) validateManagement() error {
+	for _, src := range c.System.Management.Sources {
+		if _, _, err := net.ParseCIDR(src); err != nil {
+			if net.ParseIP(src) == nil {
+				return fmt.Errorf("management source %q: not an ip address or CIDR prefix", src)
+			}
+		}
+	}
+	for _, p := range c.System.Management.ManagementPorts() {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("management port %d is out of range", p)
+		}
 	}
 	return nil
 }

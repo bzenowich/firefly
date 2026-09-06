@@ -60,6 +60,15 @@
   <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Device <input name="device" value="{{$if.Device}}" size="8" required></label>
   <label>Static IP <input name="ipv4" value="{{$if.IPv4}}" size="18" placeholder="192.168.1.1/24" required></label>
+  {{if ne $if.Role "lan"}}
+  <label>Trust
+    <select name="trust">
+      <option value="trusted" {{if eq $if.TrustLevel "trusted"}}selected{{end}}>trusted — full access</option>
+      <option value="guest" {{if eq $if.TrustLevel "guest"}}selected{{end}}>guest — internet + DNS/DHCP, not the LAN</option>
+      <option value="isolated" {{if eq $if.TrustLevel "isolated"}}selected{{end}}>isolated — internet only, no peers</option>
+    </select>
+  </label>
+  {{end}}
   <button type="submit">Save</button>
 </form>
 
