@@ -20,6 +20,9 @@ type socketSink struct {
 	conn     net.Conn
 	backoff  time.Duration
 	lastDial time.Time
+	// noRedial is set under Capsicum, where connect(2) by path is unavailable
+	// after cap_enter. A dropped connection is then terminal for this process.
+	noRedial bool
 }
 
 const (
@@ -38,6 +41,42 @@ func newSocketSink(path string) *socketSink {
 	return &socketSink{path: path, backoff: minBackoff}
 }
 
+// Connect establishes the connection up front and reports whether it worked.
+//
+// It exists for capability mode (see -capsicum in main.go): cap_enter(2)
+// removes access to the global namespace, so connect(2) by path stops working
+// and the lazy redial below cannot happen. Under Capsicum the process therefore
+// connects here, before entering, and gives up its ability to reconnect — which
+// is why the flag also turns a dropped connection into an exit, so rc restarts
+// the process rather than leaving it capturing into nothing.
+func (s *socketSink) Connect() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	conn, err := net.DialTimeout("unix", s.path, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	s.conn = conn
+	return nil
+}
+
+// NoRedial marks the sink as unable to reconnect, which is the state after
+// cap_enter.
+func (s *socketSink) NoRedial() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noRedial = true
+}
+
+// Lost reports whether the connection has dropped and cannot be re-established.
+// The caller ends the process, so rc restarts it with a fresh connection —
+// supervision replaces the in-process retry that capability mode removed.
+func (s *socketSink) Lost() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.noRedial && s.conn == nil
+}
+
 // Emit writes one label, dialing if needed. A write error — including the
 // deadline expiring on a collector that stopped reading — drops the connection
 // so the next Emit redials; the label itself is lost (best-effort).
@@ -45,6 +84,9 @@ func (s *socketSink) Emit(l flow.Label) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conn == nil {
+		if s.noRedial {
+			return nil // cannot reconnect; main's watchdog will end the process
+		}
 		if !s.dialLocked() {
 			return nil // still backing off; drop this label
 		}

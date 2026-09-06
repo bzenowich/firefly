@@ -1008,25 +1008,90 @@ listed as done.
       forward-secret AEAD cipher list, and the HTTP→HTTPS redirect now targets
       the appliance's own address rather than echoing the client's `Host`.
 
-### Phase S4 — Deferred, tracked
+### Phase S4 — **Four done 2026-09-05; three genuinely deferred**
 
-- [ ] **Capsicum for `ndpi-helper`** — see S2 above for what blocks it and what
-      would have to change. Needs the box.
-- [ ] **IPv6 rule parity** — a prerequisite of any IPv6 support, not of
-      shipping v4.
+- [x] **SEC-7 — roles.** `admin` / `operator` / `viewer`, enforced centrally in
+      `ServeHTTP` from one route table rather than a check inside each of
+      seventy handlers — seventy chances to forget, and the one that forgets is
+      not discoverable by reading any single file.
 
-- [ ] **SEC-7** — roles. Wanted, but it touches every handler and is better done
-      once the handler set stops moving.
-- [ ] Passkeys/WebAuthn (`plan.md` §7) — replaces the password-plus-TOTP
-      surface rather than patching it.
-- [ ] Encrypted config backup (a passphrase-wrapped export), so a `.json` in
-      Downloads is not the whole appliance.
-- [ ] Signed update feed and BE rollback verification.
-- [ ] `internal/adblock`, when it is built, downloads attacker-influenceable
-      content on a schedule: it must run in `fwd` (non-root), pin TLS
-      verification, cap response size, validate every parsed domain, and never
-      let a fetch failure break an apply. Writing that constraint down now so it
-      is designed in rather than reviewed in.
+      Two defaults, chosen in opposite directions on purpose: a **read**
+      defaults to viewer, because pages are what the role exists for; a
+      **write** defaults to admin, so a route added later with no entry is
+      refused for everyone but an administrator. That fails toward "an operator
+      cannot do something they should" — a bug report — rather than "an operator
+      can do something they should not", which is a vulnerability.
+
+      An unset role is **admin**, not viewer: a config document written before
+      roles existed describes accounts that could do everything, and silently
+      demoting them on upgrade would lock an operator out of their own
+      appliance. The last administrator cannot be deleted or demoted, and a
+      document with no administrator fails validation — the only recovery from
+      that is editing JSON on the console.
+
+- [x] **Encrypted config backup.** Optional passphrase on the download;
+      argon2id (deliberately heavier than the login hash — it runs twice, not
+      on every attempt) into AES-GCM, with the KDF parameters in an
+      authenticated header so an edited cost cannot open the file more cheaply.
+      Parameters are bounded on read, the same lesson as SEC-4c. Plaintext
+      export stays available: an operator restoring on a box they cannot type
+      into needs it, and a format nobody can read without this program is its
+      own hazard.
+
+- [x] **IPv6 rule parity** — and the first attempt at it was wrong in a way
+      worth recording, because only a real `pfctl` caught it.
+
+      The obvious reading of "parity" is an `inet6` twin for every `inet` rule.
+      That is what I wrote, it passed every string-comparison test, and on the
+      VM `pfctl -nf` rejected it: `inet6 ... from $if:network` on an interface
+      with no IPv6 address is *"rule expands to no valid combination"*, which
+      fails the **whole ruleset**. On a v4-only box — which is every appliance
+      today — nothing would have loaded at all. A test that greps rendered text
+      cannot see this; the parser is the only thing that knows.
+
+      The correct answer is simpler and strictly better: write the filter rules
+      with **no address-family keyword**, which in pf means both. Each rule then
+      expands to whatever addresses the interface actually has. Verified on the
+      box: the same rule produced `inet proto tcp from 192.168.1.0/24` *and*
+      `inet6 proto tcp from fec0::/64` for the LAN, while a v4-only segment got
+      v4 rules and no error. There is now no second set of rules to keep in
+      step, which removes the drift the twins would have invited.
+
+      NAT stays `inet` (IPv6 does not NAT) and ICMP/ICMPv6 keep their own rules,
+      since they are genuinely different protocols. The ICMPv6 that IPv6 cannot
+      function without — neighbour discovery, router advertisement, path-MTU —
+      is admitted explicitly rather than by a blanket `proto icmp6 all`;
+      blocking it does not harden IPv6, it breaks it in ways that look like
+      intermittent application faults.
+
+- [x] **Capsicum for `ndpi-helper` — implemented, opt-in, unverified.** The
+      blocker recorded in S2 is resolved: the sink gains an eager `Connect` and
+      a no-redial mode, and under `-capsicum` a dropped collector connection
+      ends the process so rc restarts it — supervision replacing the in-process
+      retry that `cap_enter` removes.
+
+      It stays **off by default** (`ndpi_helper_capsicum`), because the two
+      unknowns still need hardware: whether libnDPI opens a file after
+      initialisation (custom category and risk lists are a documented feature),
+      and whether the Go runtime does. Both would show up as the classifier
+      dying rather than as an error, so the flag waits until someone has watched
+      it run with the real `-tags "pcap ndpi"` build. On the bring-up list.
+
+**Genuinely deferred, and why — these are not oversights:**
+
+- [ ] **Passkeys/WebAuthn** (`plan.md` §7). A feature, not a hardening fix: it
+      *replaces* the password-plus-TOTP surface rather than patching it, and it
+      needs a vendored library, which runs straight into the deliberate line
+      that the only vendored JS on this appliance is htmx and xterm. It wants
+      designing against that constraint, not squeezing into a security pass.
+- [ ] **Signed update feed and BE rollback verification.** The update system it
+      would secure does not exist yet. Building the signing half first would
+      mean guessing at the shape of the thing being signed.
+- [ ] **`internal/adblock` constraints.** There is nothing to implement: the
+      fetcher is unbuilt (`docs/adblock.md`). The constraint stands as written
+      — run in `fwd` (non-root), pin TLS verification, cap response size,
+      validate every parsed domain, never let a fetch failure break an apply —
+      so it is designed in rather than reviewed in.
 
 ---
 

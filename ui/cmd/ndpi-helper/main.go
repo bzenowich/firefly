@@ -30,12 +30,14 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
 	socket := flag.String("socket", "/var/run/fw-ndpi.sock", "collector unix socket to stream labels to")
 	devs := flag.String("devices", "", "comma-separated capture devices (with -tags pcap)")
 	runAs := flag.String("user", "", "drop to this account once capture is open (recommended: _fwdpcap)")
+	capsicum := flag.Bool("capsicum", false, "enter Capsicum capability mode after capture is open (FreeBSD; see docs/security-plan.md)")
 	flag.Parse()
 
 	log.SetPrefix("ndpi-helper: ")
@@ -78,11 +80,53 @@ func main() {
 		log.Printf("WARNING: running as root; pass -user to drop privilege after capture is open")
 	}
 
+	// Capability mode removes connect(2) by path, so the sink must be connected
+	// before entering and can never reconnect afterwards. Both halves are set
+	// together: connecting eagerly without disabling the redial would leave a
+	// process that silently stops labelling after the collector restarts.
+	if *capsicum {
+		if !capsicumSupported {
+			log.Fatalf("-capsicum: capability mode is a FreeBSD facility")
+		}
+		if err := sink.Connect(); err != nil {
+			log.Fatalf("-capsicum: the collector must be reachable before entering capability mode: %v", err)
+		}
+		sink.NoRedial()
+		if err := enterCapabilityMode(); err != nil {
+			log.Fatalf("entering capability mode: %v", err)
+		}
+		log.Printf("running in Capsicum capability mode")
+	}
+
 	eng := NewEngine(src, newClassifier(), sink)
 	log.Printf("streaming labels to %s", *socket)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Under capability mode a dropped collector connection cannot be redialled,
+	// so this process would sit capturing into nothing. End it and let rc
+	// restart it with a fresh connection: supervision replaces the in-process
+	// retry that cap_enter took away.
+	if *capsicum {
+		go func() {
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if sink.Lost() {
+						log.Printf("collector connection lost and cannot be re-established under capability mode; exiting for a restart")
+						stop()
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	if err := eng.Run(ctx); err != nil {
 		log.Fatalf("engine: %v", err)
 	}

@@ -36,6 +36,16 @@ load_rc_config $name
 # guess, because capturing on the wrong interface is a silent wrong answer.
 : ${ndpi_helper_devices:=""}
 : ${ndpi_helper_log:="/var/log/ndpi-helper.log"}
+# Capsicum capability mode: after capture is open the process keeps its
+# descriptors and loses the global namespace entirely, which is close to ideal
+# for a libnDPI process aimed at hostile traffic (docs/security-plan.md SEC-2a).
+#
+# Off by default because two things can only be established on real hardware:
+# whether libnDPI opens any file after initialisation, and whether the Go
+# runtime does. Both would show up as the classifier dying rather than as an
+# error. Turn it on once you have watched it run, and note that under it a
+# dropped collector connection ends the process for rc to restart.
+: ${ndpi_helper_capsicum:="NO"}
 
 pidfile="/var/run/${name}.pid"
 procname="/usr/local/sbin/ndpi-helper"
@@ -47,6 +57,7 @@ command_args="-p ${pidfile} -t ndpi-helper -o ${ndpi_helper_log}"
 command_args="${command_args} ${procname} -socket ${ndpi_helper_socket}"
 [ -n "${ndpi_helper_user}" ] && command_args="${command_args} -user ${ndpi_helper_user}"
 [ -n "${ndpi_helper_devices}" ] && command_args="${command_args} -devices ${ndpi_helper_devices}"
+checkyesno ndpi_helper_capsicum 2>/dev/null && command_args="${command_args} -capsicum"
 
 start_precmd="ndpi_helper_prestart"
 
