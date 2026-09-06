@@ -375,6 +375,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The user must be in the context before the re-auth gate: its refusals are
 	// audited, and an audit line with no actor is worth much less.
 	r = r.WithContext(context.WithValue(r.Context(), userKey{}, user))
+	// Authorisation before re-authentication: an account that may not do a
+	// thing at all should be told so, not asked to confirm its password first.
+	if !s.checkRole(w, r, user) {
+		return
+	}
 	if !s.checkReauth(w, r) {
 		return
 	}
@@ -822,6 +827,12 @@ type pageData struct {
 	Elevated     bool
 	ReauthWindow string
 	Sessions     []auth.Session // session inventory (SEC-11)
+	// Role is the signed-in account's role, and CanAdmin/CanOperate are the
+	// two comparisons templates actually make (SEC-7). Hiding a control a role
+	// cannot use is presentation, not enforcement — routeRole is the boundary.
+	Role       string
+	CanAdmin   bool
+	CanOperate bool
 
 	Timezones []string // System page timezone dropdown options
 
@@ -841,8 +852,14 @@ type pageData struct {
 func (s *Server) data(p Page, r *http.Request) pageData {
 	cfg := s.store.Get()
 	nav := pages
-	if cfg.Shell.Enabled {
-		nav = append(append([]Page{}, pages...), shellPage)
+	// The shell is admin-only (routeRole); offering the nav entry to an account
+	// that would be refused is just a worse way to say no.
+	if cfg.Shell.Enabled && r != nil {
+		if user, _ := r.Context().Value(userKey{}).(string); user != "" {
+			if u, ok := cfg.User(user); ok && u.AtLeast(config.RoleAdmin) {
+				nav = append(append([]Page{}, pages...), shellPage)
+			}
+		}
 	}
 	d := pageData{
 		Title:  p.Title,
@@ -858,10 +875,11 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		if c, err := r.Cookie(sessionCookie); err == nil {
 			d.CSRF, _ = s.sessions.CSRF(c.Value)
 		}
-		for _, u := range d.Cfg.Users {
-			if u.Username == d.User {
-				d.TOTPEnrolled = u.TOTPSecret != ""
-			}
+		if u, ok := d.Cfg.User(d.User); ok {
+			d.TOTPEnrolled = u.TOTPSecret != ""
+			d.Role = u.EffectiveRole()
+			d.CanAdmin = u.AtLeast(config.RoleAdmin)
+			d.CanOperate = u.AtLeast(config.RoleOperator)
 		}
 		s.totpMu.Lock()
 		d.TOTPPending = s.totpPending[d.User] != ""

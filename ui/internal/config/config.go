@@ -216,6 +216,75 @@ type User struct {
 	PasswordHash string `json:"password_hash"`
 	// TOTPSecret is the base32 RFC 6238 secret; empty = 2FA not enrolled.
 	TOTPSecret string `json:"totp_secret,omitempty"`
+	// Role is what this account may do (docs/security-plan.md SEC-7). Empty
+	// means RoleAdmin, so every account in an existing config document keeps
+	// exactly the access it had.
+	Role string `json:"role,omitempty"`
+}
+
+// Account roles, ordered by what they may do.
+//
+// Every account used to be able to do everything: edit the firewall, read every
+// flow, download every secret, open a shell. There was no way to give someone
+// the Devices page without also giving them pf, and no read-only account for
+// "let me see what the network is doing" — so in practice everyone who needed
+// to look at anything got the keys to the whole appliance.
+const (
+	// RoleViewer may read. It is the role for someone who needs to see traffic
+	// and device activity and nothing else.
+	RoleViewer = "viewer"
+	// RoleOperator may additionally change the network: interfaces, NAT, DHCP,
+	// DNS, WireGuard, and apply. It may not touch accounts, the security
+	// settings that protect them, or anything that hands out a secret.
+	RoleOperator = "operator"
+	// RoleAdmin may do everything, including managing accounts.
+	RoleAdmin = "admin"
+)
+
+// roleRank orders the roles for comparison. Unknown or empty ranks as admin —
+// see Role().
+var roleRank = map[string]int{RoleViewer: 1, RoleOperator: 2, RoleAdmin: 3}
+
+// EffectiveRole returns the account's role, resolving the unset case.
+//
+// An unset role is admin, not viewer. That is the migration-safe direction: a
+// config document written before roles existed describes accounts that could do
+// everything, and silently demoting them on upgrade would lock an operator out
+// of their own appliance. Provisioning a *new* account defaults to admin only
+// because the UI makes the choice explicit.
+func (u User) EffectiveRole() string {
+	if _, ok := roleRank[u.Role]; ok {
+		return u.Role
+	}
+	return RoleAdmin
+}
+
+// AtLeast reports whether the account's role is at or above want.
+func (u User) AtLeast(want string) bool {
+	return roleRank[u.EffectiveRole()] >= roleRank[want]
+}
+
+// Admins counts the accounts that can manage accounts. Used to refuse the last
+// one being deleted or demoted, which would leave an appliance nobody can
+// administer.
+func (c Config) Admins() int {
+	n := 0
+	for _, u := range c.Users {
+		if u.EffectiveRole() == RoleAdmin {
+			n++
+		}
+	}
+	return n
+}
+
+// User looks up an account by name.
+func (c Config) User(name string) (User, bool) {
+	for _, u := range c.Users {
+		if u.Username == name {
+			return u, true
+		}
+	}
+	return User{}, false
 }
 
 type System struct {
@@ -1219,6 +1288,12 @@ func (c *Config) validateFlow() error {
 }
 
 func (c *Config) validateUsers() error {
+	// An appliance with no administrator cannot be administered, and the only
+	// recovery is editing the config document by hand on the console. Refuse
+	// the document rather than produce one.
+	if len(c.Users) > 0 && c.Admins() == 0 {
+		return errors.New("at least one account must have the admin role")
+	}
 	seen := map[string]bool{}
 	for _, u := range c.Users {
 		if u.Username == "" {
@@ -1242,6 +1317,11 @@ func (c *Config) validateUsers() error {
 		// (docs/security-plan.md SEC-4a).
 		if _, _, _, _, _, err := auth.ParseHash(u.PasswordHash); err != nil {
 			return fmt.Errorf("user %q: password hash: %w", u.Username, err)
+		}
+		if u.Role != "" {
+			if _, ok := roleRank[u.Role]; !ok {
+				return fmt.Errorf("user %q: unknown role %q", u.Username, u.Role)
+			}
 		}
 	}
 	return nil

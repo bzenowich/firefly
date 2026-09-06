@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +34,7 @@ func (s *Server) routesSystem() {
 	s.mux.HandleFunc("POST /system/ntp/servers/delete", s.handleNTPServerDelete)
 	s.mux.HandleFunc("POST /system/ntp/test", s.handleNTPTest)
 	s.mux.HandleFunc("POST /system/management", s.handleManagement)
+	s.mux.HandleFunc("POST /system/users/{name}/role", s.handleUserRole)
 
 	// Re-authentication (SEC-6) and the session inventory (SEC-11).
 	s.mux.HandleFunc("POST /system/reauth", s.handleReauth)
@@ -205,17 +205,30 @@ func (s *Server) handleShellToggle(w http.ResponseWriter, r *http.Request) {
 // story. It includes password hashes and WireGuard/TOTP secrets — the file
 // deserves the same care as the appliance itself.
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
-	data, err := json.MarshalIndent(s.store.Get(), "", "  ")
+	// A passphrase encrypts the download (config.Export). Optional rather than
+	// required: an operator restoring on a box they cannot type into needs the
+	// plaintext form, and a format nobody can read without this program is its
+	// own hazard. What the passphrase buys is that a file which ends up in a
+	// Downloads folder, an email to oneself or a cloud sync is not the whole
+	// appliance.
+	passphrase := r.URL.Query().Get("passphrase")
+
+	data, err := config.Export(s.store.Get(), passphrase)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		redirect(w, r, "/system", err)
 		return
 	}
+	name, ctype := "fw-config.json", "application/json"
+	if passphrase != "" {
+		name, ctype = "fw-config.fwbak", "application/octet-stream"
+	}
 	// Every secret on the box leaves the appliance here, so the fact that it
-	// happened is exactly the kind of thing an incident review needs.
-	s.auditRequest(r, "config.backup", "bytes=%d", len(data))
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="fw-config.json"`)
-	w.Write(append(data, '\n'))
+	// happened is exactly what an incident review needs — including whether it
+	// left encrypted.
+	s.auditRequest(r, "config.backup", "bytes=%d encrypted=%t", len(data), passphrase != "")
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Write(data)
 }
 
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
@@ -230,11 +243,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/system", err)
 		return
 	}
-	var next config.Config
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	dec.DisallowUnknownFields() // catches uploading the wrong JSON file
-	if err := dec.Decode(&next); err != nil {
-		redirect(w, r, "/system", fmt.Errorf("not a valid backup: %w", err))
+	next, err := config.Import(data, r.FormValue("passphrase"))
+	if err != nil {
+		redirect(w, r, "/system", err)
 		return
 	}
 	if err := s.store.Replace(next); err != nil {
@@ -253,13 +264,19 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/system", errors.New("password must be at least 8 characters"))
 		return
 	}
+	role := r.FormValue("role")
+	if role == "" {
+		role = config.RoleViewer // least privilege when the form omits it
+	}
 	hash := auth.HashPassword(password) // outside the store lock; ~50 ms
 	err := s.store.Update(func(c *config.Config) error {
-		c.Users = append(c.Users, config.User{Username: username, PasswordHash: hash})
+		c.Users = append(c.Users, config.User{
+			Username: username, PasswordHash: hash, Role: role,
+		})
 		return nil
 	})
 	if err == nil {
-		s.auditRequest(r, "user.created", "account=%s", username)
+		s.auditRequest(r, "user.created", "account=%s role=%s", username, role)
 	}
 	redirect(w, r, "/system", err)
 }
@@ -269,6 +286,11 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Update(func(c *config.Config) error {
 		if len(c.Users) == 1 {
 			return errors.New("cannot delete the last user")
+		}
+		// An appliance with no administrator can only be recovered by editing
+		// the config document on the console.
+		if u, ok := c.User(name); ok && u.EffectiveRole() == config.RoleAdmin && c.Admins() == 1 {
+			return errors.New("cannot delete the last administrator")
 		}
 		for i, u := range c.Users {
 			if u.Username == name {
@@ -423,6 +445,32 @@ func (s *Server) handleManagement(w http.ResponseWriter, r *http.Request) {
 	})
 	if err == nil {
 		s.auditRequest(r, "management.sources", "count=%d", len(sources))
+	}
+	redirect(w, r, "/system", err)
+}
+
+// handleUserRole changes an account's role.
+func (s *Server) handleUserRole(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	role := r.FormValue("role")
+	err := s.store.Update(func(c *config.Config) error {
+		u, ok := c.User(name)
+		if !ok {
+			return errors.New("user not found")
+		}
+		// Demoting the last administrator leaves an appliance nobody can
+		// administer. Refusing here is the same guard as on delete, for the
+		// same reason.
+		if u.EffectiveRole() == config.RoleAdmin && role != config.RoleAdmin && c.Admins() == 1 {
+			return errors.New("cannot remove the last administrator's role")
+		}
+		return updateUser(name, func(u *config.User) { u.Role = role })(c)
+	})
+	if err == nil {
+		// A role change is a privilege change: whatever that account had open
+		// stays open at the old level until it re-authenticates.
+		s.sessions.DeleteUser(name)
+		s.auditRequest(r, "user.role_changed", "account=%s role=%s", name, role)
 	}
 	redirect(w, r, "/system", err)
 }

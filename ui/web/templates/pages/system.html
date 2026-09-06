@@ -8,6 +8,7 @@
   </label>
   <button type="submit">Save</button>
 </form>
+
 <h2>Time</h2>
 <form method="post" action="/system/time" class="row-form">
   <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
@@ -59,6 +60,8 @@
 {{end}}
 <p><a href="/system/pf.conf" class="button-link">Preview generated pf.conf</a>
    <span class="muted">— rendered live from the current config.</span></p>
+
+{{if .CanAdmin}}
 <h2>Management access</h2>
 <p class="muted">
   Which addresses may reach this WebUI and SSH. One address or CIDR prefix per
@@ -74,6 +77,7 @@
   </label>
   <button type="submit">Save</button>
 </form>
+{{end}}
 
 <h2>Security confirmation</h2>
 {{if .Elevated}}
@@ -105,6 +109,7 @@
 </form>
 {{end}}
 
+{{if .CanAdmin}}
 <h2>Active sessions</h2>
 <p class="muted">
   Every browser currently signed in as any account. Sessions also expire on
@@ -137,26 +142,51 @@
   <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <button type="submit" class="secondary">Sign out everywhere else</button>
 </form>
+{{end}}
 
+{{if .CanAdmin}}
 <h2>Backup &amp; restore</h2>
-<p>
-  <a href="/system/backup" class="button-link">Download backup</a>
-  <span class="muted">— the complete appliance config, including credentials and keys. Store it safely.</span>
+<p class="muted">
+  The backup is the complete appliance: password hashes, WireGuard private keys,
+  TOTP seeds and the SMTP password. A passphrase encrypts it, so a file that
+  ends up in a Downloads folder or an email to yourself is not the whole
+  firewall. Leave it empty for plain JSON — readable anywhere, and readable by
+  anyone.
 </p>
+<form method="get" action="/system/backup" class="row-form">
+  <label>Passphrase <input type="password" name="passphrase" minlength="12"
+         placeholder="optional, 12+ characters" autocomplete="new-password"></label>
+  <button type="submit">Download backup</button>
+</form>
 <form method="post" action="/system/restore" enctype="multipart/form-data" class="row-form">
   <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
-  <input type="file" name="backup" accept="application/json" required>
+  <input type="file" name="backup" required>
+  <label>Passphrase <input type="password" name="passphrase"
+         placeholder="if encrypted" autocomplete="off"></label>
   <button type="submit" class="danger">Restore</button>
   <span class="muted">Replaces the entire config; apply afterwards to take effect.</span>
 </form>
+{{end}}
 
+{{if .CanAdmin}}
 <h2>Users</h2>
 <table>
-  <thead><tr><th>Username</th><th>2FA</th><th></th></tr></thead>
+  <thead><tr><th>Username</th><th>Role</th><th>2FA</th><th></th></tr></thead>
   <tbody>
     {{range .Cfg.Users}}
     <tr>
       <td>{{.Username}}</td>
+      <td>
+        <form method="post" action="/system/users/{{.Username}}/role" class="row-form">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <select name="role">
+            <option value="viewer" {{if eq .EffectiveRole "viewer"}}selected{{end}}>viewer — read only</option>
+            <option value="operator" {{if eq .EffectiveRole "operator"}}selected{{end}}>operator — network, not accounts</option>
+            <option value="admin" {{if eq .EffectiveRole "admin"}}selected{{end}}>admin — everything</option>
+          </select>
+          <button type="submit" class="secondary">Set</button>
+        </form>
+      </td>
       <td>{{if .TOTPSecret}}<span class="ok">enrolled</span>{{else}}<span class="muted">off</span>{{end}}</td>
       <td class="actions">
         {{if eq .Username $.EditID}}
@@ -184,8 +214,16 @@
   <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <label>Username <input name="username" required></label>
   <label>Password <input type="password" name="password" minlength="8" required></label>
+  <label>Role
+    <select name="role">
+      <option value="viewer" selected>viewer — read only</option>
+      <option value="operator">operator — network, not accounts</option>
+      <option value="admin">admin — everything</option>
+    </select>
+  </label>
   <button type="submit">Add</button>
 </form>
+{{end}}
 
 <h2>Two-factor authentication ({{.User}})</h2>
 {{if .TOTPEnrolled}}
@@ -209,6 +247,8 @@
   <span class="muted">Adds a 6-digit authenticator code to your login.</span>
 </form>
 {{end}}
+
+{{if .CanAdmin}}
 <h2>Web shell</h2>
 <p class="muted">
   A browser terminal with the configured shell privileges. Off by default and
@@ -224,7 +264,9 @@
   </label>
   <button type="submit" class="danger">Save</button>
 </form>
+{{end}}
 
+{{if .CanAdmin}}
 <h2>Email (SMTP relay)</h2>
 {{$m := .Cfg.SMTP}}
 <p class="muted">Outbound mail relay, used to email WireGuard client configs and (later) status and alert notifications. Leave the host blank to disable email.</p>
@@ -248,4 +290,5 @@
 </form>
 
 <!-- TODO: updates via boot environments, certificates, reboot/halt -->
+{{end}}
 {{end}}

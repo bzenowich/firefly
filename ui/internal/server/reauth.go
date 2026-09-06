@@ -58,6 +58,8 @@ func needsReauth(r *http.Request) (string, bool) {
 			return "change a password", true
 		case strings.HasSuffix(r.URL.Path, "/delete"):
 			return "delete an account", true
+		case strings.HasSuffix(r.URL.Path, "/role"):
+			return "change an account's role", true
 		}
 	}
 	if strings.HasPrefix(r.URL.Path, "/system/sessions/") && strings.HasSuffix(r.URL.Path, "/revoke") {
