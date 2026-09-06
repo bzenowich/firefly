@@ -16,6 +16,7 @@ import (
 
 func TestShellDisabledByDefault(t *testing.T) {
 	c, store := newTestServer(t)
+	c.reauth(t)
 
 	if store.Get().Shell.Enabled {
 		t.Fatal("shell enabled in default config")
@@ -37,6 +38,7 @@ func TestShellDisabledByDefault(t *testing.T) {
 
 func TestShellToggleEnablesNavAndPage(t *testing.T) {
 	c, store := newTestServer(t)
+	c.reauth(t)
 
 	c.post(t, "/system/shell", url.Values{"enabled": {"on"}})
 	if !store.Get().Shell.Enabled {
@@ -96,6 +98,7 @@ func TestShellBridgeEcho(t *testing.T) {
 		t.Skip("no /bin/sh")
 	}
 	c, _ := newTestServer(t)
+	c.reauth(t)
 	c.post(t, "/system/shell", url.Values{"enabled": {"on"}})
 
 	ts := httptest.NewServer(c.srv)

@@ -40,8 +40,8 @@ func TestVerifyPasswordMalformed(t *testing.T) {
 }
 
 func TestSessions(t *testing.T) {
-	s := NewSessions(time.Hour)
-	tok := s.Create("admin")
+	s := NewSessions(time.Hour, 24*time.Hour)
+	tok := s.Create("admin", "192.0.2.1")
 	if user, ok := s.Get(tok); !ok || user != "admin" {
 		t.Fatalf("Get = %q, %v", user, ok)
 	}
@@ -55,8 +55,8 @@ func TestSessions(t *testing.T) {
 }
 
 func TestSessionExpiry(t *testing.T) {
-	s := NewSessions(time.Millisecond)
-	tok := s.Create("admin")
+	s := NewSessions(time.Millisecond, time.Hour)
+	tok := s.Create("admin", "192.0.2.1")
 	time.Sleep(5 * time.Millisecond)
 	if _, ok := s.Get(tok); ok {
 		t.Error("expired session still valid")

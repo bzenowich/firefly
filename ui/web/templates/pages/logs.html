@@ -7,6 +7,7 @@
       <option value="" {{if eq .LogFilter.Source ""}}selected{{end}}>all</option>
       <option value="pf" {{if eq .LogFilter.Source "pf"}}selected{{end}}>firewall (pf)</option>
       <option value="system" {{if eq .LogFilter.Source "system"}}selected{{end}}>system</option>
+      <option value="audit" {{if eq .LogFilter.Source "audit"}}selected{{end}}>security audit</option>
     </select>
   </label>
   <label>Contains <input name="contains" value="{{.LogFilter.Contains}}" size="25" placeholder="filter text"></label>
@@ -20,6 +21,25 @@
 {{end}}
 
 {{define "logtable"}}
+{{if .ShowAudit}}
+{{if .Audit}}
+<table class="logs">
+  <thead><tr><th>Time</th><th>Event</th><th>Actor</th><th>Detail</th></tr></thead>
+  <tbody>
+    {{range .Audit}}
+    <tr>
+      <td class="mono">{{.Time.Format "2006-01-02 15:04:05"}}</td>
+      <td class="mono">{{.Event}}</td>
+      <td>{{.Actor}}</td>
+      <td class="mono">{{.Detail}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No audit entries yet.</p>
+{{end}}
+{{else}}
 {{if .Logs}}
 <table class="logs">
   <thead><tr><th>Time</th><th>Source</th><th>Message</th></tr></thead>
@@ -35,5 +55,6 @@
 </table>
 {{else}}
 <p class="muted">No log entries{{if or .LogFilter.Source .LogFilter.Contains}} matching the filter{{end}} yet.</p>
+{{end}}
 {{end}}
 {{end}}

@@ -59,6 +59,85 @@
 {{end}}
 <p><a href="/system/pf.conf" class="button-link">Preview generated pf.conf</a>
    <span class="muted">— rendered live from the current config.</span></p>
+<h2>Management access</h2>
+<p class="muted">
+  Which addresses may reach this WebUI and SSH. One address or CIDR prefix per
+  line. Leave it empty for the whole LAN — which is what the appliance did
+  before this setting existed, and is why narrowing it is opt-in: a firewall
+  that locks its owner out on upgrade is worse than one with a wide admin plane.
+</p>
+<form method="post" action="/system/management">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+  <label>Allowed sources
+    <textarea name="sources" rows="3" cols="30"
+              placeholder="192.168.1.10&#10;10.9.0.0/24">{{range .Cfg.System.Management.Sources}}{{.}}&#10;{{end}}</textarea>
+  </label>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Security confirmation</h2>
+{{if .Elevated}}
+<p class="muted">
+  Confirmed. Sensitive actions are unlocked for the next {{.ReauthWindow}}.
+  <form method="post" action="/system/lock" class="row-form">
+    <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+    <button type="submit" class="secondary">Lock now</button>
+  </form>
+</p>
+{{else}}
+<p class="muted">
+  Changing accounts, restoring a configuration, downloading the backup,
+  disabling two-factor authentication and toggling the web terminal need your
+  password again. One stolen session cookie should not be enough to take the
+  appliance over permanently.
+</p>
+<form method="post" action="/system/reauth" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+  <label>Password
+    <input type="password" name="password" required autocomplete="current-password">
+  </label>
+  {{if .TOTPEnrolled}}
+  <label>Code
+    <input name="totp" inputmode="numeric" autocomplete="one-time-code" required>
+  </label>
+  {{end}}
+  <button type="submit">Confirm</button>
+</form>
+{{end}}
+
+<h2>Active sessions</h2>
+<p class="muted">
+  Every browser currently signed in as any account. Sessions also expire on
+  their own: {{.ReauthWindow}} of confirmation, 12 hours idle, 24 hours
+  absolute.
+</p>
+<table>
+  <thead><tr><th>User</th><th>From</th><th>Signed in</th><th>Last seen</th><th>Expires</th><th></th></tr></thead>
+  <tbody>
+    {{range .Sessions}}
+    <tr>
+      <td>{{.User}}{{if .Current}} <span class="muted">(this browser)</span>{{end}}</td>
+      <td class="mono">{{.From}}</td>
+      <td>{{.Created.Format "2006-01-02 15:04"}}</td>
+      <td>{{.LastSeen.Format "15:04:05"}}</td>
+      <td>{{.Expires.Format "2006-01-02 15:04"}}</td>
+      <td>
+        {{if not .Current}}
+        <form method="post" action="/system/sessions/{{.ID}}/revoke">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <button type="submit" class="secondary">Revoke</button>
+        </form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+<form method="post" action="/system/sessions/all" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+  <button type="submit" class="secondary">Sign out everywhere else</button>
+</form>
+
 <h2>Backup &amp; restore</h2>
 <p>
   <a href="/system/backup" class="button-link">Download backup</a>

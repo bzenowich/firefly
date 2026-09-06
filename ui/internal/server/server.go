@@ -59,8 +59,24 @@ var pages = []Page{
 const (
 	sessionCookie = "fw_session"
 	sessionTTL    = 12 * time.Hour // idle timeout; activity extends it
-	loginMaxFails = 5
-	loginWindow   = 15 * time.Minute
+	// sessionLifetime is the absolute cap. It does not move, whatever the
+	// session does — the dashboard's 2 s poll would otherwise keep an open tab
+	// alive forever (docs/security-plan.md SEC-11).
+	sessionLifetime = 24 * time.Hour
+	loginMaxFails   = 5
+	loginWindow     = 15 * time.Minute
+
+	// reauthWindow is how long a re-authentication counts for. Long enough to
+	// finish the task that prompted it, short enough that a walked-away-from
+	// laptop is not a standing authorisation (SEC-6).
+	reauthWindow = 5 * time.Minute
+
+	// loginCSRFCookie is the pre-session double-submit cookie. /login has no
+	// session to bind a synchronizer token to, so the token is its own cookie
+	// and the form echoes it: an attacker who cannot read the victim's cookies
+	// cannot produce a matching pair (SEC-15).
+	loginCSRFCookie = "fw_login_csrf"
+	loginCSRFField  = "login_csrf"
 
 	// CSRF synchronizer token: forms carry it as a hidden field, htmx sends it
 	// as a header via layout.html's hx-headers.
@@ -71,6 +87,12 @@ const (
 	// over — a day, which is what "how much has this thing used" means to an
 	// admin looking at the table.
 	deviceUsageRange = "day"
+
+	// auditSource is the pseudo-source the Logs page uses to select the audit
+	// trail. It is not a row in the log ring — the trail lives in its own table
+	// — but reusing the page's existing source selector keeps one filter UI
+	// rather than two.
+	auditSource = "audit"
 
 	// Request body ceilings (docs/security-plan.md SEC-4b). Nothing bounded
 	// request bodies before this. r.FormValue on a multipart request calls
@@ -149,6 +171,11 @@ type Server struct {
 
 	shellMu     sync.Mutex
 	shellActive int // live web-shell sessions, capped by Shell.MaxSessions
+
+	// setupToken gates first-run account creation (SEC-9). Minted at startup
+	// only when the appliance has no users, printed to the console, and never
+	// stored: a reboot mints a new one, which is the recovery path.
+	setupToken string
 }
 
 var funcs = template.FuncMap{
@@ -191,7 +218,7 @@ func New(store *config.Store, priv privsep.Ops, shell privsep.ShellOpener, wg pr
 		traffic:      trafStore,
 		flow:         flowStore,
 		mux:          http.NewServeMux(),
-		sessions:     auth.NewSessions(sessionTTL),
+		sessions:     auth.NewSessions(sessionTTL, sessionLifetime),
 		logins:       auth.NewLimiter(loginMaxFails, loginWindow),
 		tmpls:        map[string]*template.Template{},
 		totpPending:  map[string]string{},
@@ -257,6 +284,22 @@ func New(store *config.Store, priv privsep.Ops, shell privsep.ShellOpener, wg pr
 		return nil, err
 	}
 	s.mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+
+	// Mint the first-run setup token before any route is served. Only when the
+	// appliance has no users: on a configured box there is nothing to claim, so
+	// printing a token would be noise that teaches operators to ignore it.
+	if len(store.Get().Users) == 0 {
+		s.setupToken = auth.SetupToken()
+		log.Printf("=====================================================================")
+		log.Printf(" No admin account exists yet. To create one, browse to the WebUI and")
+		log.Printf(" enter this setup token:")
+		log.Printf("")
+		log.Printf("     %s", s.setupToken)
+		log.Printf("")
+		log.Printf(" It is printed only here, changes on every restart, and is required")
+		log.Printf(" once so that whoever reaches the box first cannot claim it.")
+		log.Printf("=====================================================================")
+	}
 
 	s.mux.HandleFunc("GET /login", s.handleLoginPage)
 	s.mux.HandleFunc("POST /login", s.handleLogin)
@@ -329,7 +372,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.checkCSRF(w, r) {
 		return
 	}
-	s.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
+	// The user must be in the context before the re-auth gate: its refusals are
+	// audited, and an audit line with no actor is worth much less.
+	r = r.WithContext(context.WithValue(r.Context(), userKey{}, user))
+	if !s.checkReauth(w, r) {
+		return
+	}
+	s.mux.ServeHTTP(w, r)
 }
 
 // parseBody parses a state-changing request's form up front, writing the
@@ -472,7 +521,19 @@ func (s *Server) sessionUser(r *http.Request) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return s.sessions.Get(c.Value)
+	// Record where the request came from: the session inventory is only useful
+	// if an admin can tell their own session from the one they are about to
+	// revoke (docs/security-plan.md SEC-11).
+	return s.sessions.GetFrom(c.Value, remoteIP(r))
+}
+
+// sessionToken returns the caller's raw session token, for the operations that
+// must act on "this session" specifically.
+func sessionToken(r *http.Request) string {
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		return c.Value
+	}
+	return ""
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
@@ -487,8 +548,42 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 }
 
 type loginData struct {
-	FirstRun bool // no users yet: show the create-admin form
-	Error    string
+	FirstRun       bool // no users yet: show the create-admin form
+	NeedSetupToken bool // ...and it needs the console token
+	Error          string
+	CSRF           string // pre-session double-submit token (SEC-15)
+}
+
+// issueLoginCSRF mints the pre-session double-submit token and sets its cookie.
+//
+// /login and /setup cannot carry a synchronizer token: there is no session to
+// bind one to. The residual is login-CSRF — an attacker forcing a victim's
+// browser into a session on an account the attacker controls, then reading
+// what the victim does in it. A cookie the attacker cannot read, echoed in the
+// form, closes it: producing a matching pair requires reading the victim's
+// cookies, and an attacker who can do that does not need this.
+func (s *Server) issueLoginCSRF(w http.ResponseWriter, r *http.Request) string {
+	token := auth.RandomToken()
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginCSRFCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((30 * time.Minute).Seconds()),
+	})
+	return token
+}
+
+// checkLoginCSRF verifies the double-submit pair on a pre-session form.
+func (s *Server) checkLoginCSRF(r *http.Request) bool {
+	c, err := r.Cookie(loginCSRFCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	got := r.FormValue(loginCSRFField)
+	return got != "" && subtle.ConstantTimeCompare([]byte(c.Value), []byte(got)) == 1
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -500,29 +595,49 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	d := loginData{
 		FirstRun: len(s.store.Get().Users) == 0,
 		Error:    r.URL.Query().Get("err"),
+		CSRF:     s.issueLoginCSRF(w, r),
 	}
+	d.NeedSetupToken = d.FirstRun && s.setupToken != ""
 	if err := s.loginTmpl.Execute(w, d); err != nil {
 		log.Printf("render login: %v", err)
 	}
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	username := strings.TrimSpace(r.FormValue("username"))
-	// Two buckets, both of which must allow: the address bucket stops one host
-	// spraying every account, the username bucket stops a botnet — or one host
-	// walking its own IPv6 range — grinding a single account (design-review
-	// §4.6).
-	addrBucket, userBucket := limiterAddrKey(remoteIP(r)), limiterUserKey(username)
-	if !s.logins.Allow(addrBucket) || !s.logins.Allow(userBucket) {
-		redirect(w, r, "/login", errors.New("too many failed attempts, try again later"))
+	if !s.checkLoginCSRF(r) {
+		redirect(w, r, "/login", errors.New("your login form expired — try again"))
 		return
+	}
+	username := strings.TrimSpace(r.FormValue("username"))
+
+	// Two buckets with deliberately different behaviour (SEC-12). The address
+	// bucket is a hard cap: a host that has guessed wrong five times can wait.
+	// The username bucket is an escalating delay, never a refusal — a hard cap
+	// there lets any LAN device lock the admin out of their own firewall, which
+	// trades a remote brute-force for a local denial of service.
+	addrBucket, userBucket := limiterAddrKey(remoteIP(r)), limiterUserKey(username)
+	if !s.logins.Allow(addrBucket) {
+		s.audit("login.blocked", "user=%s from=%s reason=address-rate-limit", username, remoteIP(r))
+		redirect(w, r, "/login", errors.New("too many failed attempts from this address, try again later"))
+		return
+	}
+	if d := s.logins.Delay(userBucket); d > 0 {
+		// Sleep rather than refuse. The cost lands on the attempt, so guessing
+		// gets slower and slower while the account's owner is only ever
+		// delayed.
+		select {
+		case <-time.After(d):
+		case <-r.Context().Done():
+			return
+		}
 	}
 
 	// Every failure below reports errInvalidLogin: which factor was wrong is
 	// exactly what an attacker wants to know.
-	fail := func() {
+	fail := func(reason string) {
 		s.logins.Fail(addrBucket)
 		s.logins.Fail(userBucket)
+		s.audit("login.failed", "user=%s from=%s reason=%s", username, remoteIP(r), reason)
 		redirect(w, r, "/login", errInvalidLogin)
 	}
 
@@ -535,20 +650,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !auth.VerifyPassword(hash, r.FormValue("password")) || !found {
-		fail()
+		fail("password")
 		return
 	}
 	if totpSecret != "" {
 		step, ok := auth.VerifyTOTPStep(totpSecret, r.FormValue("totp"))
 		if !ok || !s.totpSpend(username, step) {
-			fail()
+			fail("totp")
 			return
 		}
 	}
 
 	s.logins.Reset(addrBucket)
 	s.logins.Reset(userBucket)
-	s.setSessionCookie(w, r, s.sessions.Create(username))
+	s.setSessionCookie(w, r, s.sessions.Create(username, remoteIP(r)))
+	s.audit("login.ok", "user=%s from=%s", username, remoteIP(r))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -587,6 +703,7 @@ func limiterAddrKey(ip string) string {
 func limiterUserKey(username string) string { return "user:" + username }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.auditRequest(r, "logout", "")
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		s.sessions.Delete(c.Value)
 	}
@@ -601,10 +718,35 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-// handleSetup creates the first admin account and logs it in. Only valid
-// while no users exist; afterwards user management belongs to the System
-// page (TODO).
+// handleSetup creates the first admin account and logs it in. Only valid while
+// no users exist; afterwards user management belongs to the System page.
+//
+// It requires the setup token printed on the console at first boot
+// (docs/security-plan.md SEC-9). Without it, the window between power-on and
+// the owner reaching the UI is a race for ownership of the firewall — and on a
+// LAN with a hostile device that is not a race the owner reliably wins. For a
+// product that ships to someone else's house that is a shipping blocker, not a
+// nicety.
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if !s.checkLoginCSRF(r) {
+		redirect(w, r, "/login", errors.New("your setup form expired — try again"))
+		return
+	}
+	// Rate-limited on the same address bucket as login: the token is short
+	// enough to type, so it is short enough to guess if guessing is free.
+	addrBucket := limiterAddrKey(remoteIP(r))
+	if !s.logins.Allow(addrBucket) {
+		s.audit("setup.blocked", "from=%s reason=address-rate-limit", remoteIP(r))
+		redirect(w, r, "/login", errors.New("too many attempts from this address, try again later"))
+		return
+	}
+	if !s.checkSetupToken(r.FormValue("setup_token")) {
+		s.logins.Fail(addrBucket)
+		s.audit("setup.failed", "from=%s reason=token", remoteIP(r))
+		redirect(w, r, "/login", errors.New("wrong setup token — it is printed on the console at first boot"))
+		return
+	}
+
 	password := r.FormValue("password")
 	if len(password) < 8 {
 		redirect(w, r, "/login", errors.New("password must be at least 8 characters"))
@@ -627,8 +769,24 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/login", err)
 		return
 	}
-	s.setSessionCookie(w, r, s.sessions.Create(username))
+	s.logins.Reset(addrBucket)
+	s.audit("setup.ok", "user=%s from=%s", username, remoteIP(r))
+	s.setSessionCookie(w, r, s.sessions.Create(username, remoteIP(r)))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// checkSetupToken compares the submitted token against the one minted at
+// startup, in constant time.
+//
+// An empty stored token means the appliance never printed one — which happens
+// only when users already exist, and handleSetup is refused on that ground
+// anyway. Treating it as "accept anything" would turn a missing token into no
+// protection at all, so it is treated as "accept nothing".
+func (s *Server) checkSetupToken(got string) bool {
+	if s.setupToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(s.setupToken), []byte(strings.TrimSpace(got))) == 1
 }
 
 // remoteIP keys the login limiter. The UI binds LAN-only with no proxy in
@@ -658,10 +816,22 @@ type pageData struct {
 	TOTPEnrolled bool // logged-in user has 2FA active
 	TOTPPending  bool // enrollment QR awaiting confirmation
 
+	// Elevated reports whether this session is inside its re-authentication
+	// window; the System page shows the confirm-password prompt when it is not
+	// (docs/security-plan.md SEC-6).
+	Elevated     bool
+	ReauthWindow string
+	Sessions     []auth.Session // session inventory (SEC-11)
+
 	Timezones []string // System page timezone dropdown options
 
 	Logs      []logs.Entry // Logs page only
 	LogFilter logs.Filter
+	// Audit is the security trail, shown when the Logs page's source filter
+	// selects it. It is a separate table with its own retention, so a burst of
+	// pf logging cannot evict it (docs/security-plan.md SEC-10).
+	Audit     []logs.AuditEntry
+	ShowAudit bool
 
 	WGSessions map[string]string // WireGuard page: client ID -> last-seen text
 
@@ -696,6 +866,13 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		s.totpMu.Lock()
 		d.TOTPPending = s.totpPending[d.User] != ""
 		s.totpMu.Unlock()
+		if tok := sessionToken(r); tok != "" {
+			d.Elevated = s.sessions.Elevated(tok)
+			if p.Path == "/system" {
+				d.Sessions = s.sessions.List(tok)
+			}
+		}
+		d.ReauthWindow = reauthWindow.String()
 	}
 	d.ApplyDeadline, d.ApplyPending = s.priv.Pending()
 	if p.Path == "/system" {
@@ -712,9 +889,19 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 			Source:   r.URL.Query().Get("source"),
 			Contains: r.URL.Query().Get("contains"),
 		}
-		var err error
-		if d.Logs, err = s.logStore.Recent(d.LogFilter); err != nil {
-			log.Printf("logs query: %v", err)
+		if d.LogFilter.Source == auditSource {
+			d.ShowAudit = true
+			var err error
+			if d.Audit, err = s.logStore.RecentAudit(logs.AuditFilter{
+				Contains: d.LogFilter.Contains,
+			}); err != nil {
+				log.Printf("audit query: %v", err)
+			}
+		} else {
+			var err error
+			if d.Logs, err = s.logStore.Recent(d.LogFilter); err != nil {
+				log.Printf("logs query: %v", err)
+			}
 		}
 	}
 	return d
@@ -827,15 +1014,21 @@ func (s *Server) handlePFPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, "/system", s.priv.Apply(s.store.Get()))
+	err := s.priv.Apply(s.store.Get())
+	s.auditRequest(r, "apply", "result=%s", auditResult(err))
+	redirect(w, r, "/system", err)
 }
 
 func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, "/system", s.priv.Confirm())
+	err := s.priv.Confirm()
+	s.auditRequest(r, "apply.confirm", "result=%s", auditResult(err))
+	redirect(w, r, "/system", err)
 }
 
 func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, "/system", s.priv.Rollback())
+	err := s.priv.Rollback()
+	s.auditRequest(r, "apply.rollback", "result=%s", auditResult(err))
+	redirect(w, r, "/system", err)
 }
 
 // parseForward reads port-forward form fields; semantic checks (port range,
@@ -927,6 +1120,12 @@ func (s *Server) handleInterfaceAddress(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			c.Interfaces[i].Device = strings.TrimSpace(r.FormValue("device"))
+			// Trust is only offered for non-LAN segments: the LAN is the admin
+			// plane's home and demoting it would lock the operator out of the
+			// page they are standing on.
+			if c.Interfaces[i].Role != "lan" {
+				c.Interfaces[i].Trust = r.FormValue("trust")
+			}
 			c.Interfaces[i].DHCPClient = r.FormValue("mode") == "dhcp"
 			c.Interfaces[i].IPv4 = ""
 			if !c.Interfaces[i].DHCPClient {

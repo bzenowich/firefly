@@ -14,6 +14,7 @@ import (
 
 func TestBackupRestoreRoundTrip(t *testing.T) {
 	c, store := newTestServer(t)
+	c.reauth(t)
 
 	// Make the config distinctive, download it.
 	c.post(t, "/system/hostname", url.Values{"hostname": {"backup-test"}})
@@ -66,6 +67,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 
 func TestUserManagement(t *testing.T) {
 	c, store := newTestServer(t)
+	c.reauth(t)
 
 	// Last user is protected.
 	if loc := c.post(t, "/system/users/admin/delete", url.Values{}); !strings.Contains(loc.Query().Get("err"), "last user") {
@@ -105,6 +107,7 @@ func TestUserManagement(t *testing.T) {
 // that cookies issued under the old one stop working (design-review §4.5).
 func TestPasswordChangeRevokesSessions(t *testing.T) {
 	c, _ := newTestServer(t)
+	c.reauth(t)
 	c.post(t, "/system/users", url.Values{"username": {"bob"}, "password": {"longenough"}})
 
 	w := login(c.srv, "10.0.0.5:1234", "bob", "longenough")
@@ -136,6 +139,7 @@ func TestPasswordChangeRevokesSessions(t *testing.T) {
 
 func TestTOTPEnrollmentAndLogin(t *testing.T) {
 	c, store := newTestServer(t)
+	c.reauth(t)
 
 	if loc := c.post(t, "/system/totp/begin", url.Values{}); loc.Query().Get("err") != "" {
 		t.Fatalf("totp begin: %s", loc.Query().Get("err"))
@@ -167,14 +171,12 @@ func TestTOTPEnrollmentAndLogin(t *testing.T) {
 		t.Fatal("secret not committed")
 	}
 
-	// Login without the code now fails; with it, succeeds.
+	// Login without the code now fails; with it, succeeds. Goes through
+	// loginWith so the pre-session token is carried the way a browser does.
 	login := func(totp string) *httptest.ResponseRecorder {
-		form := url.Values{"username": {"admin"}, "password": {"correct horse"}, "totp": {totp}}
-		req := httptest.NewRequest("POST", "/login", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		w := httptest.NewRecorder()
-		c.srv.ServeHTTP(w, req)
-		return w
+		return loginWith(c.srv, "10.0.9.1:1234", url.Values{
+			"username": {"admin"}, "password": {"correct horse"}, "totp": {totp},
+		})
 	}
 	if w := login(""); w.Header().Get("Location") == "/" {
 		t.Fatal("login without totp succeeded")

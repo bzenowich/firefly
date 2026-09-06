@@ -50,6 +50,10 @@ func Open(path string, capacity int64) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("logs schema: %w", err)
 	}
+	if _, err := db.Exec(auditSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("audit schema: %w", err)
+	}
 	return &Store{db: db, cap: capacity}, nil
 }
 
@@ -86,8 +90,7 @@ func (s *Store) Recent(f Filter) ([]Entry, error) {
 	}
 	if f.Contains != "" {
 		q += ` AND line LIKE ? ESCAPE '\'`
-		esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(f.Contains)
-		args = append(args, "%"+esc+"%")
+		args = append(args, "%"+escapeLike(f.Contains)+"%")
 	}
 	q += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, f.Limit)

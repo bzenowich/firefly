@@ -13,6 +13,17 @@
     {{if .FirstRun}}
     <p class="muted">Create the administrator account to finish setup.</p>
     <form method="post" action="/setup">
+      <input type="hidden" name="login_csrf" value="{{.CSRF}}">
+      {{if .NeedSetupToken}}
+      <p class="muted">
+        The setup token is printed on the appliance console at boot. It is
+        required once, so that whoever reaches the box first cannot claim it.
+      </p>
+      <label>Setup token
+        <input name="setup_token" required autocomplete="off" spellcheck="false"
+               class="mono" placeholder="XXXX-XXXX-XXXX-XXXX">
+      </label>
+      {{end}}
       <label>Username
         <input name="username" required autofocus autocomplete="username">
       </label>
@@ -26,6 +37,7 @@
     </form>
     {{else}}
     <form method="post" action="/login">
+      <input type="hidden" name="login_csrf" value="{{.CSRF}}">
       <label>Username
         <input name="username" required autofocus autocomplete="username">
       </label>

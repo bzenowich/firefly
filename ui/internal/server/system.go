@@ -34,6 +34,35 @@ func (s *Server) routesSystem() {
 	s.mux.HandleFunc("POST /system/ntp/servers", s.handleNTPServerAdd)
 	s.mux.HandleFunc("POST /system/ntp/servers/delete", s.handleNTPServerDelete)
 	s.mux.HandleFunc("POST /system/ntp/test", s.handleNTPTest)
+	s.mux.HandleFunc("POST /system/management", s.handleManagement)
+
+	// Re-authentication (SEC-6) and the session inventory (SEC-11).
+	s.mux.HandleFunc("POST /system/reauth", s.handleReauth)
+	s.mux.HandleFunc("POST /system/lock", s.handleLock)
+	s.mux.HandleFunc("POST /system/sessions/{id}/revoke", s.handleSessionRevoke)
+	s.mux.HandleFunc("POST /system/sessions/all", s.handleSessionRevokeOthers)
+}
+
+// handleSessionRevoke ends one session from the inventory.
+func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.sessions.DeleteID(id) {
+		redirect(w, r, "/system", errors.New("that session has already ended"))
+		return
+	}
+	s.auditRequest(r, "session.revoked", "session=%s", id)
+	redirect(w, r, "/system", nil)
+}
+
+// handleSessionRevokeOthers is "sign out everywhere else" — the action someone
+// takes when they believe a cookie has been stolen. It deliberately keeps the
+// caller's own session: logging them out of the browser they are fixing the
+// problem from helps nobody.
+func (s *Server) handleSessionRevokeOthers(w http.ResponseWriter, r *http.Request) {
+	user, _ := r.Context().Value(userKey{}).(string)
+	n := s.sessions.DeleteOthers(user, sessionToken(r))
+	s.auditRequest(r, "session.revoked_others", "count=%d", n)
+	redirect(w, r, "/system", fmt.Errorf("signed out %d other session(s)", n))
 }
 
 // handleSetTimezone stores the appliance's UTC offset (config.Timezones).
@@ -166,8 +195,7 @@ func (s *Server) handleShellToggle(w http.ResponseWriter, r *http.Request) {
 		if enable {
 			state = "enabled"
 		}
-		user, _ := r.Context().Value(userKey{}).(string)
-		s.auditShell("config %s by user=%s from=%s", state, user, remoteIP(r))
+		s.auditRequest(r, "shell.config", "state=%s", state)
 	}
 	redirect(w, r, "/system", err)
 }
@@ -182,6 +210,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Every secret on the box leaves the appliance here, so the fact that it
+	// happened is exactly the kind of thing an incident review needs.
+	s.auditRequest(r, "config.backup", "bytes=%d", len(data))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", `attachment; filename="fw-config.json"`)
 	w.Write(append(data, '\n'))
@@ -207,9 +238,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.Replace(next); err != nil {
+		s.auditRequest(r, "config.restore_rejected", "error=%q", err.Error())
 		redirect(w, r, "/system", fmt.Errorf("restore rejected: %w", err))
 		return
 	}
+	s.auditRequest(r, "config.restored", "users=%d", len(next.Users))
 	redirect(w, r, "/system", errors.New("restored — review and apply to take effect"))
 }
 
@@ -225,6 +258,9 @@ func (s *Server) handleUserCreate(w http.ResponseWriter, r *http.Request) {
 		c.Users = append(c.Users, config.User{Username: username, PasswordHash: hash})
 		return nil
 	})
+	if err == nil {
+		s.auditRequest(r, "user.created", "account=%s", username)
+	}
 	redirect(w, r, "/system", err)
 }
 
@@ -250,6 +286,7 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 		delete(s.totpPending, name)
 		delete(s.totpLastStep, name)
 		s.totpMu.Unlock()
+		s.auditRequest(r, "user.deleted", "account=%s", name)
 	}
 	redirect(w, r, "/system", err)
 }
@@ -276,8 +313,9 @@ func (s *Server) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 		// own password is not logged out by the act of doing it.
 		s.sessions.DeleteUser(name)
 		if actor, _ := r.Context().Value(userKey{}).(string); actor == name {
-			s.setSessionCookie(w, r, s.sessions.Create(name))
+			s.setSessionCookie(w, r, s.sessions.Create(name, remoteIP(r)))
 		}
+		s.auditRequest(r, "user.password_changed", "account=%s", name)
 	}
 	redirect(w, r, "/system", err)
 }
@@ -342,6 +380,7 @@ func (s *Server) handleTOTPConfirm(w http.ResponseWriter, r *http.Request) {
 		u.TOTPSecret = secret
 	}))
 	if err == nil {
+		s.auditRequest(r, "totp.enrolled", "")
 		s.totpMu.Lock()
 		delete(s.totpPending, user)
 		s.totpMu.Unlock()
@@ -354,5 +393,36 @@ func (s *Server) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Update(updateUser(user, func(u *config.User) {
 		u.TOTPSecret = ""
 	}))
+	if err == nil {
+		s.auditRequest(r, "totp.disabled", "")
+	}
+	redirect(w, r, "/system", err)
+}
+
+// handleManagement saves the admin-plane policy: who may reach the WebUI and
+// sshd (docs/security-plan.md SEC-5).
+//
+// It is behind the re-auth gate. An earlier version of this comment argued it
+// need not be, on the grounds that the setting could only narrow access — which
+// is wrong: a source list is a list, and "0.0.0.0/0" widens it. Widening the
+// admin plane is the first thing someone holding a stolen session would do.
+//
+// The ruleset refuses to expose the admin plane on the WAN regardless of what
+// this list says (render.writeManagementRules), so the worst a bad list can do
+// is open it to the whole of an internal segment.
+func (s *Server) handleManagement(w http.ResponseWriter, r *http.Request) {
+	var sources []string
+	for _, line := range strings.Split(r.FormValue("sources"), "\n") {
+		if v := strings.TrimSpace(line); v != "" {
+			sources = append(sources, v)
+		}
+	}
+	err := s.store.Update(func(c *config.Config) error {
+		c.System.Management.Sources = sources
+		return nil
+	})
+	if err == nil {
+		s.auditRequest(r, "management.sources", "count=%d", len(sources))
+	}
 	redirect(w, r, "/system", err)
 }

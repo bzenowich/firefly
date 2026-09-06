@@ -78,15 +78,23 @@ func newTestFlowStore(t *testing.T) *flow.Store {
 }
 
 // setup runs first-run admin creation and returns the session cookie.
+// setup completes first-run account creation the way a browser does: fetch the
+// login page to get the pre-session double-submit cookie (SEC-15), then post it
+// back alongside the console setup token (SEC-9).
 func setup(t *testing.T, srv *Server) *http.Cookie {
 	t.Helper()
+	loginCookie, loginCSRF := loginPageToken(t, srv)
+
 	form := url.Values{
-		"username": {"admin"},
-		"password": {"correct horse"},
-		"confirm":  {"correct horse"},
+		"username":     {"admin"},
+		"password":     {"correct horse"},
+		"confirm":      {"correct horse"},
+		loginCSRFField: {loginCSRF},
+		"setup_token":  {srv.setupToken},
 	}
 	req := httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(loginCookie)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
@@ -194,10 +202,17 @@ func TestFirstRunSetup(t *testing.T) {
 		t.Errorf("stored hash: %q", users[0].PasswordHash)
 	}
 
-	// Second setup attempt fails.
-	form := url.Values{"username": {"evil"}, "password": {"password123"}, "confirm": {"password123"}}
+	// Second setup attempt fails — with a valid pre-session token and the real
+	// setup token, so this exercises the already-completed guard rather than
+	// stopping at one of the gates in front of it.
+	loginCookie, loginCSRF := loginPageToken(t, srv)
+	form := url.Values{
+		"username": {"evil"}, "password": {"password123"}, "confirm": {"password123"},
+		loginCSRFField: {loginCSRF}, "setup_token": {srv.setupToken},
+	}
 	req := httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(loginCookie)
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	loc, _ := url.Parse(w.Header().Get("Location"))
@@ -214,12 +229,32 @@ func TestFirstRunSetup(t *testing.T) {
 	_ = cookie
 }
 
-// login posts credentials from addr and returns the recorder.
+// login posts credentials from addr and returns the recorder. It carries the
+// pre-session double-submit token the way a browser would (SEC-15).
 func login(srv *Server, addr, user, pass string) *httptest.ResponseRecorder {
-	form := url.Values{"username": {user}, "password": {pass}}
+	return loginWith(srv, addr, url.Values{"username": {user}, "password": {pass}})
+}
+
+// loginWith is login with control over the whole form, for the tests that need
+// to omit or corrupt a field.
+func loginWith(srv *Server, addr string, form url.Values) *httptest.ResponseRecorder {
+	var loginCookie *http.Cookie
+	pw := httptest.NewRecorder()
+	srv.ServeHTTP(pw, httptest.NewRequest("GET", "/login", nil))
+	for _, c := range pw.Result().Cookies() {
+		if c.Name == loginCSRFCookie {
+			loginCookie = c
+		}
+	}
+	if loginCookie != nil && form.Get(loginCSRFField) == "" {
+		form.Set(loginCSRFField, loginCookie.Value)
+	}
 	req := httptest.NewRequest("POST", "/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.RemoteAddr = addr
+	if loginCookie != nil {
+		req.AddCookie(loginCookie)
+	}
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	return w
@@ -290,19 +325,47 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 }
 
-// TestLoginRateLimitPerUsername covers the second limiter bucket
-// (design-review §4.6): failures spread across addresses must still lock the
-// account, or a botnet grinds one account unthrottled.
+// TestLoginRateLimitPerUsername covers the second limiter bucket. It must slow
+// a botnet grinding one account from many addresses without ever locking the
+// account, because a lockout anyone can trigger is a denial of service against
+// the admin's own firewall (docs/security-plan.md SEC-12).
 func TestLoginRateLimitPerUsername(t *testing.T) {
 	c, _ := newTestServer(t)
 	for i := range loginMaxFails {
 		login(c.srv, fmt.Sprintf("10.0.1.%d:1234", i), "admin", "wrong")
 	}
-	// A never-seen address, but the username bucket is spent.
+
+	// The username bucket is spent, so a further attempt is delayed...
+	if d := c.srv.logins.Delay(limiterUserKey("admin")); d <= 0 {
+		t.Errorf("username bucket applies no delay after %d failures", loginMaxFails)
+	}
+	// ...but the right password from a clean address still gets in. This is the
+	// property that distinguishes a delay from a lockout, and the reason the
+	// bucket changed shape.
 	w := login(c.srv, "10.0.1.99:1234", "admin", "correct horse")
+	if w.Header().Get("Location") != "/" {
+		loc, _ := url.Parse(w.Header().Get("Location"))
+		t.Errorf("correct password refused after username-bucket failures: %q",
+			loc.Query().Get("err"))
+	}
+
+	// A successful login clears the bucket, so the next attempt is not delayed.
+	if d := c.srv.logins.Delay(limiterUserKey("admin")); d != 0 {
+		t.Errorf("delay %v still applied after a successful login", d)
+	}
+}
+
+// The address bucket keeps its hard cap: a host that has guessed wrong five
+// times is refused outright, and being told to wait costs it nothing.
+func TestLoginRateLimitAddressIsAHardCap(t *testing.T) {
+	c, _ := newTestServer(t)
+	for range loginMaxFails {
+		login(c.srv, "10.0.2.1:1234", "admin", "wrong")
+	}
+	w := login(c.srv, "10.0.2.1:1234", "admin", "correct horse")
 	loc, _ := url.Parse(w.Header().Get("Location"))
 	if !strings.Contains(loc.Query().Get("err"), "too many") {
-		t.Errorf("want username lockout, got %q", loc.Query().Get("err"))
+		t.Errorf("address bucket did not refuse: %q", loc.Query().Get("err"))
 	}
 }
 
@@ -529,4 +592,38 @@ func testShellOpener(t *testing.T) privsep.ShellOpener {
 	t.Cleanup(func() { cancel(); <-done })
 
 	return privsep.NewClient(path)
+}
+
+// loginPageToken fetches /login and returns the pre-session CSRF cookie and the
+// matching token rendered into the form.
+func loginPageToken(t *testing.T, srv *Server) (*http.Cookie, string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, httptest.NewRequest("GET", "/login", nil))
+	for _, c := range w.Result().Cookies() {
+		if c.Name == loginCSRFCookie && c.Value != "" {
+			return c, c.Value
+		}
+	}
+	t.Fatal("login page issued no pre-session CSRF cookie")
+	return nil, ""
+}
+
+// reauth opens the elevated window for the client's session, as an admin does
+// by confirming their password before a sensitive action (SEC-6).
+func (c *client) reauth(t *testing.T) {
+	t.Helper()
+	form := url.Values{"password": {"correct horse"}}
+	req := httptest.NewRequest("POST", "/system/reauth", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set(csrfHeader, c.csrf)
+	req.AddCookie(c.cookie)
+	w := httptest.NewRecorder()
+	c.srv.ServeHTTP(w, req)
+	if loc, _ := url.Parse(w.Header().Get("Location")); loc.Query().Get("err") != "" {
+		t.Fatalf("reauth: %s", loc.Query().Get("err"))
+	}
+	if !c.srv.sessions.Elevated(c.cookie.Value) {
+		t.Fatal("reauth did not elevate the session")
+	}
 }
