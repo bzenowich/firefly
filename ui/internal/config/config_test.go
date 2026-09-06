@@ -210,7 +210,26 @@ func TestValidateInterfaces(t *testing.T) {
 		{"wan static ok", func(c *Config) {
 			c.Interfaces[0].DHCPClient = false
 			c.Interfaces[0].IPv4 = "203.0.113.2/24"
+			c.Interfaces[0].Gateway = "203.0.113.1"
 		}, ""},
+		{"wan static without gateway", func(c *Config) {
+			c.Interfaces[0].DHCPClient = false
+			c.Interfaces[0].IPv4 = "203.0.113.2/24"
+		}, "static wan needs a gateway"},
+		{"gateway on lan", func(c *Config) {
+			c.Interfaces[1].Gateway = "192.168.1.254"
+		}, "only the wan interface carries a gateway"},
+		{"duplicate interface name", func(c *Config) { c.Interfaces[2].Name = c.Interfaces[1].Name }, "duplicate interface name"},
+		// The name becomes a pf macro, and a macro must start with a letter.
+		{"name not starting with a letter", func(c *Config) { c.Interfaces[2].Name = "1st-floor" }, "must start with a letter"},
+		// A newline would end a pf.conf comment and start a real rule.
+		{"newline in a name", func(c *Config) { c.Interfaces[2].Name = "OPT\npass in all" }, "single line"},
+		{"mixed dot and plaintext upstreams", func(c *Config) {
+			c.System.DNSServers = append(c.System.DNSServers, DNSServer{Address: "9.9.9.9"})
+		}, "all set a hostname"},
+		{"pool start after end", func(c *Config) {
+			c.DHCP[0].RangeStart, c.DHCP[0].RangeEnd = c.DHCP[0].RangeEnd, c.DHCP[0].RangeStart
+		}, "pool start must not be after pool end"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

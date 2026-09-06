@@ -15,9 +15,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+
+	"firewall/ui/internal/auth"
 )
 
 type Config struct {
@@ -167,9 +171,14 @@ func (v Visibility) Monitored(c *Config) []string {
 // so a fresh appliance ships with no web-shell attack surface. SSH remains the
 // recommended admin path.
 type Shell struct {
-	Enabled     bool   `json:"enabled"`      // master switch; false => feature off
-	Shell       string `json:"shell"`        // login shell; "" => /bin/sh
-	User        string `json:"user"`         // target unix user; "" => current/root
+	Enabled bool   `json:"enabled"` // master switch; false => feature off
+	Shell   string `json:"shell"`   // login shell; "" => /bin/sh
+	// User is the unix account the terminal runs as. Empty means the safe
+	// default (an unprivileged account — server.defaultShellUser), never the
+	// account fwd itself runs as: a web terminal that silently lands on a
+	// root prompt turns one stolen session cookie into the whole box. Set
+	// "root" explicitly to accept that.
+	User        string `json:"user"`
 	IdleTimeout int    `json:"idle_timeout"` // seconds of no I/O before kill; 0 => 15m
 	MaxSessions int    `json:"max_sessions"` // concurrent ttys; 0 => 1
 }
@@ -217,7 +226,9 @@ type System struct {
 	// non-empty Hostname turns on DNS-over-TLS and is the name verified
 	// against the server's certificate.
 	DNSServers []DNSServer `json:"dns_servers,omitempty"`
-	// NTPServers are the time sources ntpd syncs against (host or host:port).
+	// NTPServers are the time sources ntpd syncs against. Hostnames or bare
+	// addresses only: ntp.conf's server directive takes no port, so one is
+	// rejected rather than silently dropped (render.NTP).
 	NTPServers []string `json:"ntp_servers,omitempty"`
 }
 
@@ -265,6 +276,19 @@ type Interface struct {
 	Device     string `json:"device"`
 	IPv4       string `json:"ipv4,omitempty"` // CIDR; empty when DHCPClient
 	DHCPClient bool   `json:"dhcp_client,omitempty"`
+	// Gateway is the next hop installed as the default route. It belongs to
+	// a statically addressed wan; a DHCP wan gets the router from its lease
+	// and other roles do not carry a default route at all.
+	Gateway string `json:"gateway,omitempty"`
+	// HardwareOffload re-enables the NIC's segmentation/checksum offloads.
+	// The zero value (off) is what every appliance port wants: TSO/LRO
+	// coalesce segments in the NIC, which is wrong for a box that forwards
+	// and firewalls other people's packets, and it hands the flow
+	// classifier merged super-frames that break dissection. Set it only on
+	// a port that is a plain host interface and is not captured.
+	HardwareOffload bool `json:"hardware_offload,omitempty"`
+	// MTU overrides the interface MTU; 0 leaves the driver default.
+	MTU int `json:"mtu,omitempty"`
 }
 
 // ServesDHCP reports whether an interface can host a DHCP server: any non-WAN
@@ -489,6 +513,18 @@ func (c *Config) Validate() error {
 	if c.System.Hostname == "" {
 		return errors.New("system: hostname is required")
 	}
+	if err := c.validateStrings(); err != nil {
+		return err
+	}
+	// The shell-context sweep runs next to the quoting-context one, not buried
+	// in validateInterfaces, because it is the boundary that keeps a config
+	// value out of a root-executed rc.d script (docs/security-plan.md SEC-1).
+	if err := c.validateShellSafe(); err != nil {
+		return err
+	}
+	if err := c.validateShell(); err != nil {
+		return err
+	}
 	if err := c.validateSystem(); err != nil {
 		return err
 	}
@@ -569,6 +605,21 @@ func (c *Config) validateSystem() error {
 		return fmt.Errorf("system: unknown timezone %q", c.System.Timezone)
 	}
 	seen := map[string]bool{}
+	// forward-tls-upstream is a property of the whole forward zone, not of
+	// one address, so unbound cannot mix a DoT upstream with a plaintext one.
+	// Reject the mixture here rather than silently sending some queries in
+	// the clear that the admin believes are encrypted.
+	dot, plain := 0, 0
+	for _, d := range c.System.DNSServers {
+		if d.Hostname != "" {
+			dot++
+		} else {
+			plain++
+		}
+	}
+	if dot > 0 && plain > 0 {
+		return errors.New("system: dns servers must either all set a hostname (DNS-over-TLS) or none may")
+	}
 	for _, d := range c.System.DNSServers {
 		if net.ParseIP(d.Address) == nil {
 			return fmt.Errorf("system: dns server %q: invalid ip", d.Address)
@@ -577,14 +628,24 @@ func (c *Config) validateSystem() error {
 			return fmt.Errorf("system: dns server %s: duplicate", d.Address)
 		}
 		seen[d.Address] = true
-		if strings.ContainsAny(d.Hostname, " \t") {
-			return fmt.Errorf("system: dns server %s: hostname has whitespace", d.Address)
+		if d.Hostname != "" {
+			if err := validHostname(d.Hostname); err != nil {
+				return fmt.Errorf("system: dns server %s: hostname %q: %w", d.Address, d.Hostname, err)
+			}
 		}
 	}
 	ntp := map[string]bool{}
 	for _, n := range c.System.NTPServers {
 		if n == "" || strings.ContainsAny(n, " \t") {
 			return fmt.Errorf("system: ntp server %q: invalid", n)
+		}
+		// ntp.conf's "server" directive has no port field. Reject rather than
+		// quietly render a host the admin did not ask for.
+		if _, _, err := net.SplitHostPort(n); err == nil {
+			return fmt.Errorf("system: ntp server %q: a port is not supported", n)
+		}
+		if err := validHostname(n); err != nil {
+			return fmt.Errorf("system: ntp server %q: %w", n, err)
 		}
 		if ntp[n] {
 			return fmt.Errorf("system: ntp server %s: duplicate", n)
@@ -594,10 +655,250 @@ func (c *Config) validateSystem() error {
 	return nil
 }
 
+// validConfigValue rejects strings that would break out of the single-line,
+// quoted contexts the renderers put them in: pf.conf comments, unbound
+// local-data, wg-quick keys. The newline is the dangerous one — it ends a
+// comment and starts a directive that pfctl -nf then happily accepts, so a
+// pasted name could silently add a pass rule — but quotes, backslashes, and
+// control characters corrupt the surrounding syntax just as effectively.
+//
+// Every free-text field that reaches a renderer runs through this. It is
+// enforced centrally in validateStrings rather than at each call site so a new
+// field cannot quietly skip it.
+func validConfigValue(s string) error {
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r':
+			return errors.New("must be a single line")
+		case r == '"' || r == '\\':
+			return errors.New("must not contain quotes or backslashes")
+		case r < 0x20 || r == 0x7f:
+			return errors.New("must not contain control characters")
+		}
+	}
+	return nil
+}
+
+// --- Shell-context validation (docs/security-plan.md SEC-1) ---------------
+//
+// validConfigValue above is the boundary for *quoting* contexts: pf comments,
+// unbound local-data, Kea JSON. It rejects the characters that break those
+// (newline, quote, backslash, control) and nothing else, because nothing else
+// matters there.
+//
+// render.Network and render.Pflow are a different kind of context. They emit
+// /usr/local/etc/rc.d scripts at mode 0755 that root executes at every apply
+// and every boot, so a value interpolated into one is not data — it is code.
+// `;`, `&`, `|`, `$`, backtick, `(`, `)` and a bare space all pass
+// validConfigValue and all end a shell word. A device name of
+// "igc1; touch /tmp/pwned" used to render as
+//
+//	if fwnetwork_have igc1; touch /tmp/pwned; then
+//
+// Two independent defenses, because one of them is always one forgotten field
+// away from failing: the renderers shell-quote every interpolation
+// (render.shellQuote), and everything that reaches one is charset-validated
+// here against a grammar that has no metacharacters in it at all.
+
+// deviceNamePattern is a FreeBSD network interface name: a driver name, a unit
+// number, and an optional VLAN suffix — igc0, vtnet1, lagg0, wg0, igc0.100.
+// Anything a real board or a cloned interface can be called matches; nothing
+// with shell meaning does.
+var deviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]{0,14}[0-9](\.[0-9]{1,4})?$`)
+
+// validDeviceName reports whether s can name a network interface.
+func validDeviceName(s string) error {
+	if !deviceNamePattern.MatchString(s) {
+		return errors.New("must be an interface name like igc0 or igc0.100")
+	}
+	return nil
+}
+
+// unixNamePattern is a unix account name, per the same rules pw(8) enforces.
+var unixNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+// usernamePattern is a WebUI login name. It is deliberately narrower than
+// anything it flows into: audit lines, the TOTP enrollment URL, and the session
+// and limiter map keys.
+var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`)
+
+// hostLabelPattern is one DNS label: letters, digits and inner hyphens.
+var hostLabelPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+
+// validHostname accepts a DNS name or an IP literal. Callers already reject
+// whitespace via validConfigValue and their own checks; this adds the shape, so
+// a value that will be handed to a resolver or written into a config file as a
+// host is one at the point the admin types it rather than at 3am.
+func validHostname(s string) error {
+	if s == "" {
+		return errors.New("must not be empty")
+	}
+	if net.ParseIP(s) != nil {
+		return nil
+	}
+	if len(s) > 253 {
+		return errors.New("must be at most 253 characters")
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(s, "."), ".") {
+		if !hostLabelPattern.MatchString(label) {
+			return errors.New("must be a hostname or ip address")
+		}
+	}
+	return nil
+}
+
+// shellBinaries is the closed set of login shells the web terminal may exec.
+// Shell.Shell is not settable from the UI, but POST /system/restore accepts a
+// whole config document, so without this an uploaded backup naming an
+// arbitrary binary is an arbitrary-command channel (docs/security-plan.md
+// SEC-3a).
+var shellBinaries = []string{
+	"/bin/sh", "/bin/csh", "/bin/tcsh",
+	"/usr/local/bin/bash", "/usr/local/bin/zsh", "/usr/local/bin/fish",
+}
+
+// validateShell checks the web terminal's two exec-adjacent fields. Neither is
+// reachable from a form; both are reachable from a restored backup.
+func (c *Config) validateShell() error {
+	if s := c.Shell.Shell; s != "" {
+		if !slices.Contains(shellBinaries, s) {
+			return fmt.Errorf("shell: %q is not one of the permitted login shells (%s)",
+				s, strings.Join(shellBinaries, ", "))
+		}
+	}
+	if u := c.Shell.User; u != "" && !unixNamePattern.MatchString(u) {
+		return fmt.Errorf("shell: user %q is not a valid account name", u)
+	}
+	if c.Shell.IdleTimeout < 0 {
+		return errors.New("shell: idle timeout must not be negative")
+	}
+	if c.Shell.MaxSessions < 0 {
+		return errors.New("shell: max sessions must not be negative")
+	}
+	return nil
+}
+
+// validateShellSafe is the authority on every operator-settable value that
+// render/ interpolates into a *generated shell script*. It is deliberately
+// separate from validateStrings, and deliberately re-checks fields other
+// validators also cover (an interface's gateway is parsed as an IP in
+// validateInterfaces too): this list is what someone adding a renderer has to
+// read, so it must be complete on its own rather than complete only when
+// combined with four other functions.
+//
+// If you add an interpolation to render.Network or render.Pflow, add its field
+// here.
+func (c *Config) validateShellSafe() error {
+	for _, ifc := range c.Interfaces {
+		// An absent device is validateInterfaces' error to report ("device is
+		// required"), which says something more useful than a grammar
+		// mismatch would.
+		if ifc.Device == "" {
+			continue
+		}
+		// render.Network: fwnetwork_have, ifconfig, sysctl, dhclient, echo.
+		if err := validDeviceName(ifc.Device); err != nil {
+			return fmt.Errorf("interface %s: device %q: %w", ifc.Name, ifc.Device, err)
+		}
+		// render.Network: route add default.
+		if ifc.Gateway != "" && net.ParseIP(ifc.Gateway) == nil {
+			return fmt.Errorf("interface %s: gateway %q is not an ip address", ifc.Name, ifc.Gateway)
+		}
+	}
+	// render.Pflow interpolates only Flow.CollectorPort(), an int, and
+	// render.Network's remaining interpolations (address, netmask, mtu) are
+	// produced by net.ParseCIDR and strconv, not by the operator.
+	return nil
+}
+
+// validateStrings sweeps every operator-settable string that a renderer
+// interpolates into a generated config file. Renderers quote nothing and
+// escape nothing by design (the files are line-oriented), so this is the
+// boundary that keeps a config value from becoming a config directive.
+func (c *Config) validateStrings() error {
+	check := func(where, val string) error {
+		if err := validConfigValue(val); err != nil {
+			return fmt.Errorf("%s: %w", where, err)
+		}
+		return nil
+	}
+	fields := []struct{ where, val string }{
+		{"system: hostname", c.System.Hostname},
+		{"system: domain", c.System.Domain},
+	}
+	for _, d := range c.System.DNSServers {
+		fields = append(fields, struct{ where, val string }{"system: dns server hostname", d.Hostname})
+	}
+	for _, n := range c.System.NTPServers {
+		fields = append(fields, struct{ where, val string }{"system: ntp server", n})
+	}
+	for _, ifc := range c.Interfaces {
+		fields = append(fields,
+			struct{ where, val string }{"interface name", ifc.Name},
+			struct{ where, val string }{"interface device", ifc.Device})
+	}
+	for _, s := range c.Services {
+		fields = append(fields, struct{ where, val string }{"service name", s.Name})
+	}
+	for _, pf := range c.NAT.PortForwards {
+		fields = append(fields, struct{ where, val string }{"port forward name", pf.Name})
+	}
+	for _, d := range c.DHCP {
+		for _, l := range d.StaticLeases {
+			fields = append(fields, struct{ where, val string }{"static lease hostname", l.Hostname})
+		}
+	}
+	for _, o := range c.DNS.Overrides {
+		fields = append(fields, struct{ where, val string }{"dns override host", o.Host})
+	}
+	for _, t := range c.WireGuard.Tunnels {
+		fields = append(fields,
+			struct{ where, val string }{"wireguard tunnel name", t.Name},
+			struct{ where, val string }{"wireguard tunnel endpoint", t.EndpointHost})
+		for _, p := range t.Peers {
+			fields = append(fields,
+				struct{ where, val string }{"wireguard peer name", p.Name},
+				struct{ where, val string }{"wireguard peer endpoint", p.Endpoint},
+				struct{ where, val string }{"wireguard peer allowed ips", p.AllowedIPs})
+		}
+	}
+	fields = append(fields, struct{ where, val string }{"wireguard server endpoint", c.WireGuard.Server.EndpointHost})
+	for _, cl := range c.WireGuard.Server.Clients {
+		fields = append(fields, struct{ where, val string }{"wireguard client email", cl.Email})
+	}
+	for _, d := range c.Devices {
+		fields = append(fields, struct{ where, val string }{"device name", d.Name})
+	}
+	for _, f := range fields {
+		if err := check(f.where, f.val); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *Config) validateInterfaces() error {
 	devices := map[string]bool{}
+	names := map[string]bool{}
 	for _, ifc := range c.Interfaces {
 		where := fmt.Sprintf("interface %s", ifc.Name)
+		if ifc.Name == "" {
+			return errors.New("interface: name is required")
+		}
+		// The name becomes a pf macro (macro() in render/pf.go maps it to
+		// <name>_if), and a pf macro must start with a letter. A name that
+		// breaks this rule makes every future apply fail at pfctl -nf, not
+		// just the one that introduced it.
+		if r := rune(ifc.Name[0]); !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+			return fmt.Errorf("%s: name must start with a letter", where)
+		}
+		if names[strings.ToLower(ifc.Name)] {
+			return fmt.Errorf("%s: duplicate interface name", where)
+		}
+		names[strings.ToLower(ifc.Name)] = true
+		if ifc.MTU != 0 && (ifc.MTU < 576 || ifc.MTU > 9216) {
+			return fmt.Errorf("%s: mtu must be 576-9216", where)
+		}
 		if ifc.Device == "" {
 			return fmt.Errorf("%s: device is required", where)
 		}
@@ -619,6 +920,20 @@ func (c *Config) validateInterfaces() error {
 		if ifc.Role == "wan" && !ifc.DHCPClient && ifc.IPv4 == "" {
 			return fmt.Errorf("%s: wan needs dhcp or a static address", where)
 		}
+		if ifc.Gateway != "" {
+			if net.ParseIP(ifc.Gateway) == nil {
+				return fmt.Errorf("%s: gateway %q is not an ip address", where, ifc.Gateway)
+			}
+			if ifc.Role != "wan" {
+				return fmt.Errorf("%s: only the wan interface carries a gateway", where)
+			}
+		}
+		// A static wan with no next hop has no default route and cannot
+		// reach anything off-link — reject it at the form rather than ship
+		// a box that silently has no internet.
+		if ifc.Role == "wan" && !ifc.DHCPClient && ifc.Gateway == "" {
+			return fmt.Errorf("%s: a static wan needs a gateway", where)
+		}
 	}
 	return nil
 }
@@ -636,8 +951,8 @@ func (d *DNS) validate() error {
 	}
 	hosts := map[string]bool{}
 	for _, o := range d.Overrides {
-		if o.Host == "" || strings.ContainsAny(o.Host, " \t") {
-			return fmt.Errorf("dns: override %q: invalid hostname", o.Host)
+		if err := validHostname(o.Host); err != nil {
+			return fmt.Errorf("dns: override %q: %w", o.Host, err)
 		}
 		if hosts[o.Host] {
 			return fmt.Errorf("dns: override %q: duplicate host", o.Host)
@@ -827,12 +1142,24 @@ func (c *Config) validateUsers() error {
 		if u.Username == "" {
 			return errors.New("user: username is required")
 		}
+		// The name flows into audit lines, the TOTP enrollment URL, and the
+		// session and limiter map keys. Constrain it at the one place it
+		// enters the system (docs/security-plan.md SEC-16).
+		if !usernamePattern.MatchString(u.Username) {
+			return fmt.Errorf("user %q: name must be 1-32 characters of letters, digits, dot, dash or underscore, starting with a letter or digit", u.Username)
+		}
 		if seen[u.Username] {
 			return fmt.Errorf("user %q: duplicate username", u.Username)
 		}
 		seen[u.Username] = true
-		if !strings.HasPrefix(u.PasswordHash, "$argon2id$") {
-			return fmt.Errorf("user %q: password hash must be argon2id", u.Username)
+		// Parse the hash rather than sniffing its prefix. A config document
+		// arrives wholesale from POST /system/restore, and a hash with absurd
+		// parameters (m=16777216 is a 16 GiB allocation per login attempt) or a
+		// malformed body is an account that can never be logged into. Rejecting
+		// it here makes that a restore error instead of a silent lockout
+		// (docs/security-plan.md SEC-4a).
+		if _, _, _, _, _, err := auth.ParseHash(u.PasswordHash); err != nil {
+			return fmt.Errorf("user %q: password hash: %w", u.Username, err)
 		}
 	}
 	return nil
@@ -884,19 +1211,38 @@ func (c *Config) validateDHCP() error {
 		if !ifcNet.Contains(start) || !ifcNet.Contains(end) {
 			return fmt.Errorf("%s: pool must be inside %s", where, ifcNet)
 		}
+		// Kea takes the pool as "start - end" and rejects an inverted range
+		// at load time; catching it here keeps the error on the form field
+		// instead of surfacing as a failed apply.
+		if bytes.Compare(start.To16(), end.To16()) > 0 {
+			return fmt.Errorf("%s: pool start must not be after pool end", where)
+		}
 		if d.LeaseSeconds < 60 {
 			return fmt.Errorf("%s: lease must be at least 60 seconds", where)
 		}
 		macs, ips := map[string]bool{}, map[string]bool{}
-		for _, l := range d.StaticLeases {
-			hw, err := net.ParseMAC(l.MAC)
+		for i := range d.StaticLeases {
+			l := &d.StaticLeases[i]
+			// Normalize in place: net.ParseMAC also accepts the Cisco dotted
+			// form (0102.0304.0506), which Kea's hw-address rejects — that
+			// mismatch passes validation here and then fails the apply.
+			mac, err := NormalizeMAC(l.MAC)
 			if err != nil {
 				return fmt.Errorf("%s: static lease %q: invalid mac", where, l.Hostname)
 			}
-			if macs[hw.String()] {
+			l.MAC = mac
+			if macs[mac] {
 				return fmt.Errorf("%s: static lease %q: duplicate mac %s", where, l.Hostname, l.MAC)
 			}
-			macs[hw.String()] = true
+			macs[mac] = true
+			// The hostname is handed to Kea as the client's name and shows
+			// up on the Devices page; give it a shape here rather than
+			// discovering a malformed one in a lease file.
+			if l.Hostname != "" {
+				if err := validHostname(l.Hostname); err != nil {
+					return fmt.Errorf("%s: static lease %s: hostname %q: %w", where, l.MAC, l.Hostname, err)
+				}
+			}
 			if ip := net.ParseIP(l.IP); ip == nil || !ifcNet.Contains(ip) {
 				return fmt.Errorf("%s: static lease %q: ip must be inside %s", where, l.Hostname, ifcNet)
 			}
@@ -962,13 +1308,25 @@ func (n *NAT) validate(services map[string]Service) error {
 		if pf.WANPort < 1 || pf.WANPort > 65535 {
 			return fmt.Errorf("%s: wan port must be 1-65535", where)
 		}
-		key := svc.Proto + "/" + strconv.Itoa(pf.WANPort)
-		if ports[key] {
-			return fmt.Errorf("%s: wan port %d/%s already forwarded", where, pf.WANPort, svc.Proto)
+		// Expand tcp/udp so it collides with a single-protocol forward on the
+		// same port: pf would load both rdr rules and silently use the first.
+		for _, p := range protoSet(svc.Proto) {
+			key := p + "/" + strconv.Itoa(pf.WANPort)
+			if ports[key] {
+				return fmt.Errorf("%s: wan port %d/%s already forwarded", where, pf.WANPort, p)
+			}
+			ports[key] = true
 		}
-		ports[key] = true
 	}
 	return nil
+}
+
+// protoSet expands a config proto into the individual protocols it occupies.
+func protoSet(p string) []string {
+	if p == "tcp/udp" {
+		return []string{"tcp", "udp"}
+	}
+	return []string{p}
 }
 
 // NewID returns a short random identifier for config list entries.
@@ -986,6 +1344,12 @@ type Store struct {
 	mu   sync.RWMutex
 	path string
 	cfg  Config
+	// loadErr records a validation failure of the on-disk document. Open
+	// deliberately still succeeds: refusing to start would take the WebUI
+	// down with the config, leaving no way to fix it short of SSH. The
+	// invalid document is served read-only in effect, because Manager.Apply
+	// re-validates and refuses to render it.
+	loadErr error
 }
 
 // Open loads the config at path, writing the default config first if the
@@ -1006,8 +1370,22 @@ func Open(path string) (*Store, error) {
 		if err := json.Unmarshal(data, &s.cfg); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
+		// A document that never went through Update (hand-edited, restored
+		// by hand, or truncated by a power cut) can violate invariants the
+		// renderers assume. Record it rather than fail: see loadErr.
+		if err := s.cfg.Validate(); err != nil {
+			s.loadErr = fmt.Errorf("%s is invalid: %w", path, err)
+		}
 	}
 	return s, nil
+}
+
+// LoadError reports a validation failure of the config as read from disk, or
+// nil when it was well-formed. It is cleared by the first successful Update.
+func (s *Store) LoadError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.loadErr
 }
 
 // migrateLegacy upgrades a pre-per-interface config in which "dhcp" was a
@@ -1102,6 +1480,7 @@ func (s *Store) Update(fn func(*Config) error) error {
 		s.cfg = prev
 		return err
 	}
+	s.loadErr = nil // the document on disk is valid again by construction
 	return nil
 }
 
@@ -1119,8 +1498,26 @@ func (s *Store) save() error {
 		tmp.Close()
 		return err
 	}
+	// Rename is atomic but says nothing about the data being on the platter.
+	// Without this fsync a power cut moments after a save can leave a
+	// zero-length fw.json — the appliance's whole source of truth — so pay
+	// the sync on a file written only when an admin changes something.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	if err := os.Rename(tmp.Name(), s.path); err != nil {
+		return err
+	}
+	// Persist the directory entry too, so the rename itself survives.
+	dir, err := os.Open(filepath.Dir(s.path))
+	if err != nil {
+		return nil // the data is written; a missing dir handle is not fatal
+	}
+	defer dir.Close()
+	dir.Sync()
+	return nil
 }
