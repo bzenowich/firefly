@@ -1,13 +1,11 @@
 package server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -342,29 +340,20 @@ func humanSince(d time.Duration) string {
 	}
 }
 
-// wgHandshakes reads each client's last handshake time from the running
-// interface (wg show <dev> latest-handshakes). Best-effort: any error (no wg,
-// dev down, dev box) yields an empty map and the UI shows "never". Keyed by
-// public key.
+// wgHandshakes reads each client's last handshake time, keyed by public key.
+//
+// This is a privileged read — wg(8) queries the interface through a root-only
+// ioctl — so it goes through the boundary rather than being run here
+// (docs/security-plan.md §3.1). Best-effort: any error (no WireGuard, interface
+// down, helper unreachable, dev box) yields an empty map and the UI shows
+// "never" rather than an error banner on a page that is otherwise fine.
 func (s *Server) wgHandshakes() map[string]time.Time {
-	out := map[string]time.Time{}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "wg", "show", render.WGServerDevice, "latest-handshakes")
-	data, err := cmd.Output()
-	if err != nil {
-		return out
+	if s.wg == nil {
+		return map[string]time.Time{}
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		secs, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil || secs == 0 {
-			continue
-		}
-		out[fields[0]] = time.Unix(secs, 0)
+	peers, err := s.wg.WGPeers()
+	if err != nil || peers == nil {
+		return map[string]time.Time{}
 	}
-	return out
+	return peers
 }

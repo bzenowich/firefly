@@ -8,15 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
-	"os/user"
-	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"firewall/ui/internal/config"
+	"firewall/ui/internal/ptyspawn"
 
 	"github.com/creack/pty"
 	"golang.org/x/net/websocket"
@@ -50,12 +47,35 @@ func (s *Server) handleShellWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web shell is disabled", http.StatusForbidden)
 		return
 	}
+	// No opener means this build or deployment has no way to spawn a terminal
+	// at all — the privileged side did not enable it. Refuse before the
+	// upgrade, so the browser gets a status rather than a socket that opens
+	// and immediately dies.
+	if s.shell == nil {
+		s.auditShell("denied user=%s from=%s reason=unavailable", user, ip)
+		http.Error(w, "the web shell is not available on this appliance", http.StatusForbidden)
+		return
+	}
 	if !s.shellAcquire(cfg.Sessions()) {
 		s.auditShell("denied user=%s from=%s reason=maxsessions", user, ip)
 		http.Error(w, "too many shell sessions", http.StatusTooManyRequests)
 		return
 	}
 	defer s.shellRelease()
+
+	// The http.Server arms ReadTimeout/WriteTimeout as absolute deadlines on
+	// this connection; a hijacked WebSocket outlives both, so a shell session
+	// would die ~10-30 s in. Clear them before the upgrade — a zero time means
+	// "no deadline" — and let the idle watchdog below own session lifetime
+	// instead (design-review §4.3). Deadline control is unavailable on HTTP/2,
+	// which cannot carry this WebSocket anyway (no Hijack), so log and continue.
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		log.Printf("shell: clear read deadline: %v", err)
+	}
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		log.Printf("shell: clear write deadline: %v", err)
+	}
 
 	// Origin check: WebSocket bypasses SameSite cookie protection, so reject
 	// any upgrade whose Origin host differs from the request host (cross-site
@@ -85,23 +105,35 @@ func sameOrigin(origin *url.URL, host string) bool {
 	return origin != nil && strings.EqualFold(origin.Host, host)
 }
 
-// shellBridge spawns the shell and pumps bytes between the PTY and the
-// WebSocket until either side closes, then reaps the child's process group.
+// shellBridge obtains a terminal and pumps bytes between its PTY and the
+// WebSocket until either side closes.
+//
+// The shell is not forked here. It is opened through the privileged boundary
+// (internal/privsep), which owns the credentials, the account policy and the
+// reaping; this side holds only the PTY master. Closing the terminal is what
+// ends the session, and because the boundary ties the session's life to the
+// connection it was handed over on, a terminal cannot outlive this process
+// (docs/security-plan.md §3.5 step 3).
 func (s *Server) shellBridge(conn *websocket.Conn, cfg config.Shell, user, ip string) {
-	cmd, err := buildShellCmd(cfg)
+	term, err := s.shell.OpenShell(ptyspawn.Request{
+		User:  cfg.User,
+		Shell: cfg.Command(),
+		Cols:  80,
+		Rows:  24,
+	})
 	if err != nil {
 		s.auditShell("denied user=%s from=%s reason=spawn:%v", user, ip, err)
+		// The terminal is already open in the browser; without a word it just
+		// sits blank.
+		_ = frameCodec.Send(conn, wsFrame{typ: websocket.BinaryFrame,
+			data: []byte("web shell unavailable: " + err.Error() + "\r\n")})
 		return
 	}
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		s.auditShell("denied user=%s from=%s reason=pty:%v", user, ip, err)
-		return
-	}
-	defer ptmx.Close()
+	defer term.Close()
+	ptmx := term.PTY
 
 	start := time.Now()
-	s.auditShell("open user=%s from=%s pid=%d", user, ip, cmd.Process.Pid)
+	s.auditShell("open user=%s from=%s as=%s pid=%d", user, ip, term.RunAs, term.Pid)
 
 	// Idle watchdog: any frame in either direction refreshes lastActive; the
 	// ticker closes the connection once the configured idle window elapses,
@@ -163,11 +195,13 @@ func (s *Server) shellBridge(conn *websocket.Conn, cfg config.Shell, user, ip st
 	}
 	close(done)
 
-	ptmx.Close() // unblock the PTY reader
-	killProcessGroup(cmd)
-	code := exitCode(cmd.Wait())
-	s.auditShell("close user=%s from=%s exit=%d duration=%s",
-		user, ip, code, time.Since(start).Round(time.Second))
+	// Closing the terminal unblocks the PTY reader and tells the privileged
+	// side to hang up and reap. The exit code is not observable from here —
+	// the process is not ours — so the audit line records the session rather
+	// than the status.
+	term.Close()
+	s.auditShell("close user=%s from=%s as=%s pid=%d duration=%s",
+		user, ip, term.RunAs, term.Pid, time.Since(start).Round(time.Second))
 }
 
 // handleShellControl applies a JSON control frame. Only resize is defined;
@@ -184,65 +218,6 @@ func handleShellControl(data []byte, ptmx *os.File) {
 	if c.Type == "resize" && c.Cols > 0 && c.Rows > 0 {
 		_ = pty.Setsize(ptmx, &pty.Winsize{Cols: c.Cols, Rows: c.Rows})
 	}
-}
-
-// buildShellCmd constructs the login-shell command with a clean env. When a
-// target user is set and the process is root, it drops to that user's
-// credentials; on a non-root dev box it runs as the current user.
-func buildShellCmd(cfg config.Shell) (*exec.Cmd, error) {
-	cmd := exec.Command(cfg.Command(), "-l")
-	env := []string{
-		"TERM=xterm-256color",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-	}
-
-	u, err := shellUser(cfg.User)
-	if err != nil {
-		return nil, err
-	}
-	if cfg.User != "" && os.Geteuid() == 0 {
-		uid, _ := strconv.Atoi(u.Uid)
-		gid, _ := strconv.Atoi(u.Gid)
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid)},
-		}
-	}
-	cmd.Env = append(env, "USER="+u.Username, "HOME="+u.HomeDir)
-	cmd.Dir = u.HomeDir
-	return cmd, nil
-}
-
-// shellUser resolves the target user, falling back to the current process
-// user when none is configured.
-func shellUser(name string) (*user.User, error) {
-	if name == "" {
-		return user.Current()
-	}
-	return user.Lookup(name)
-}
-
-// killProcessGroup reaps the shell and everything it spawned. pty.Start sets
-// Setsid, so the child leads its own process group (pgid == pid); signal the
-// whole group, SIGHUP then SIGKILL, so a dropped browser never leaves an
-// orphan shell behind.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	pgid := cmd.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGHUP)
-	time.AfterFunc(2*time.Second, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return ee.ExitCode()
-	}
-	return -1
 }
 
 func (s *Server) shellAcquire(max int) bool {

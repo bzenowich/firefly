@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
+	"firewall/ui/internal/privsep"
+	"firewall/ui/internal/ptyspawn"
 	"firewall/ui/internal/traffic"
 )
 
@@ -34,7 +37,7 @@ func newTestServer(t *testing.T) (*client, *config.Store) {
 		t.Fatal(err)
 	}
 	mgr := apply.New(apply.OSSystem{Root: filepath.Join(t.TempDir(), "root"), NoExec: true}, time.Minute)
-	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
+	srv, err := New(store, mgr, testShellOpener(t), nil, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +173,7 @@ func TestFirstRunSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
+	srv, err := New(store, apply.New(apply.OSSystem{Root: t.TempDir(), NoExec: true}, 0), testShellOpener(t), nil, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +441,7 @@ func TestApplyWritesFiles(t *testing.T) {
 	}
 	root := filepath.Join(t.TempDir(), "root")
 	mgr := apply.New(apply.OSSystem{Root: root, NoExec: true}, 0)
-	srv, err := New(store, mgr, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
+	srv, err := New(store, mgr, testShellOpener(t), nil, newTestLogStore(t), newTestTrafficStore(t), newTestFlowStore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,4 +494,39 @@ func TestPagesRender(t *testing.T) {
 			t.Errorf("GET %s: missing title %q", p.Path, p.Title)
 		}
 	}
+}
+
+// testShellOpener returns a ShellOpener backed by a real privsep.Service on a
+// temp socket.
+//
+// There is no in-process opener to use any more (docs/security-plan.md §3.5
+// step 6), and that is the point: the only way to get a terminal is across the
+// boundary, so these tests exercise the same path the appliance does — the
+// descriptor really is passed over a unix socket. No account allowlist, because
+// these tests are about the bridge; the account policy has its own tests in
+// internal/ptyspawn.
+func testShellOpener(t *testing.T) privsep.ShellOpener {
+	t.Helper()
+
+	// Unix socket paths are capped near 104 bytes, which t.TempDir() can
+	// exceed.
+	dir, err := os.MkdirTemp("", "fwdshell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s.sock")
+
+	svc := privsep.NewService(nil, []uint32{uint32(os.Geteuid())}).
+		WithShell(&ptyspawn.Spawner{MaxSessions: 4})
+	ln, err := svc.Listen(path, 0o600, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); svc.Serve(ctx, ln) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	return privsep.NewClient(path)
 }
