@@ -1,0 +1,130 @@
+#!/bin/sh
+#
+# rc.d script for fwd, the appliance WebUI and config engine.
+#
+# Installed by os/provision-appliance.sh. Unlike the service configs fwd
+# renders, this file is not generated — fwd cannot install its own supervisor.
+#
+# fwd-helper is listed in REQUIRE so that, when fwd is configured to route
+# privileged operations through it (fwd_helper_socket below), the socket is
+# already there for the first apply. The dependency is on the *script*, which
+# provisioning always installs, not on the service being enabled — so this is
+# satisfied even on a box that still runs fwd as root.
+#
+# PROVIDE: fwd
+# REQUIRE: LOGIN FILESYSTEMS fwd-helper
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=fwd
+rcvar=fwd_enable
+
+load_rc_config $name
+
+: ${fwd_enable:="NO"}
+: ${fwd_config:="/conf/config.json"}
+: ${fwd_listen:="0.0.0.0:8443"}
+: ${fwd_data:="/var/db/fwd"}
+: ${fwd_log:="/var/log/fwd.log"}
+
+# The account fwd runs as (docs/security-plan.md §3).
+#
+# Deliberately NOT called fwd_user: rc.subr treats ${name}_user as a standard
+# variable and implements it with `su -m`, which execs the target account's
+# login shell — and _fwd is a nologin service account, so that silently fails
+# to start. daemon(8)'s -u uses setusercontext(3) and needs no shell, which is
+# what a service account wants. Empty means root.
+: ${fwd_runas:=""}
+
+# fwd-helper's socket. Every privileged operation — writes to /etc, pfctl,
+# service(8), the rollback window, the web terminal — happens there; fwd holds
+# no privilege and has no in-process fallback, so without a reachable helper it
+# serves pages and can change nothing (docs/security-plan.md §3.5).
+: ${fwd_helper_socket:="/var/run/fwd-helper.sock"}
+
+# The socket the flow classifier streams app labels to.
+#
+# It cannot live in fwd's state directory (mode 0700, and the classifier runs as
+# a different account) and it cannot live directly in /var/run either — that is
+# root:wheel 0755, so an unprivileged fwd gets EACCES trying to bind there. It
+# gets its own directory, created below by root before the drop: owned by fwd,
+# group fwd_label_peer, mode 0750, so fwd can create the socket and only the
+# classifier can traverse in to reach it.
+: ${fwd_label_socket:=""}
+: ${fwd_label_peer:=""}
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/sbin/fwd"
+
+# fwd runs in the foreground and never daemonises itself, so daemon(8) does it:
+# it forks, owns the pidfile, redirects output to the log, and drops privilege.
+# Without this `service fwd start` blocks and boot hangs.
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -t ${name} -o ${fwd_log}"
+[ -n "${fwd_runas}" ] && command_args="${command_args} -u ${fwd_runas}"
+command_args="${command_args} ${procname} -listen ${fwd_listen} -config ${fwd_config}"
+[ -n "${fwd_helper_socket}" ] && command_args="${command_args} -helper-socket ${fwd_helper_socket}"
+[ -n "${fwd_label_socket}" ] && command_args="${command_args} -label-socket ${fwd_label_socket}"
+[ -n "${fwd_label_peer}" ] && command_args="${command_args} -label-peer ${fwd_label_peer}"
+
+start_precmd="${name}_prestart"
+
+fwd_prestart()
+{
+	# rc runs this as root, before daemon(8) drops privilege. That is the only
+	# window in which the state can be created with the right owner, so do it
+	# here rather than in fwd, which by then cannot.
+	owner=${fwd_runas:-root}
+
+	# Refuse a half-configured split rather than starting into it.
+	[ -n "${fwd_helper_socket}" ] ||
+		err 1 "fwd_helper_socket is empty; fwd performs no privileged work itself"
+	[ -x /usr/local/sbin/fwd-helper ] ||
+		err 1 "fwd-helper is not installed; fwd cannot apply anything without it"
+	if [ "${owner}" != root ]; then
+		pw usershow "${owner}" >/dev/null 2>&1 ||
+			err 1 "fwd_runas=${owner} but that account does not exist; run os/provision-appliance.sh"
+	fi
+
+	# Everything below must succeed, or fwd starts against state it cannot read
+	# or write and fails in a way that looks like a bug in fwd. Each step is
+	# checked: an unchecked `install -d -o` that quietly fails is exactly how
+	# that happens.
+	install -d -m 0700 -o "${owner}" "$(dirname "${fwd_config}")" ||
+		err 1 "cannot create $(dirname "${fwd_config}") for ${owner}"
+	install -d -m 0700 -o "${owner}" "${fwd_data}" ||
+		err 1 "cannot create ${fwd_data} for ${owner}"
+
+	# The config document holds every secret on the box (WireGuard private
+	# keys, TOTP seeds, the SMTP password), so it is not world-readable.
+	if [ -f "${fwd_config}" ]; then
+		chown "${owner}" "${fwd_config}" || err 1 "cannot chown ${fwd_config} to ${owner}"
+		chmod 0600 "${fwd_config}"
+	fi
+
+	# The label socket's directory. /var/run is commonly a tmpfs rebuilt at
+	# boot, so this must happen on every start, not once at provisioning.
+	if [ -n "${fwd_label_socket}" ]; then
+		sockdir=$(dirname "${fwd_label_socket}")
+		case "${sockdir}" in
+		/|/var/run|/tmp)
+			err 1 "fwd_label_socket must be inside its own directory, not ${sockdir}" ;;
+		esac
+		install -d -m 0750 -o "${owner}" "${sockdir}" ||
+			err 1 "cannot create ${sockdir} for ${owner}"
+		# The classifier account gets group traverse, and nothing else does.
+		[ -n "${fwd_label_peer}" ] && { chgrp "${fwd_label_peer}" "${sockdir}" ||
+			err 1 "cannot set the group of ${sockdir} to ${fwd_label_peer}"; }
+	fi
+
+	# daemon(8) opens the log as the target user and will not create it.
+	if [ ! -f "${fwd_log}" ]; then
+		: > "${fwd_log}" || err 1 "cannot create ${fwd_log}"
+	fi
+	chown "${owner}" "${fwd_log}" || err 1 "cannot chown ${fwd_log} to ${owner}"
+	chmod 0640 "${fwd_log}"
+	return 0
+}
+
+run_rc_command "$1"

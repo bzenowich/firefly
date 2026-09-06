@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# rc.d script for fwd-helper, the privileged half of the appliance daemon.
+#
+# fwd-helper owns everything that needs root — writing /etc and
+# /usr/local/etc, running pfctl and service(8), and the confirm-or-rollback
+# window — and exposes exactly four operations to fwd over a unix socket.
+# fwd itself holds no privilege and can name no path, no file content and no
+# command; the only thing that crosses the socket is a config document, which
+# fwd-helper re-validates before acting on it (docs/security-plan.md §3).
+#
+# Ordering matters: fwd's first apply goes through this socket, so the helper
+# must be listening before fwd starts. REQUIRE below, plus fwd's own
+# "REQUIRE: fwd-helper", is what guarantees that.
+#
+# PROVIDE: fwd-helper
+# REQUIRE: FILESYSTEMS
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=fwd_helper
+rcvar=fwd_helper_enable
+
+load_rc_config $name
+
+: ${fwd_helper_enable:="NO"}
+: ${fwd_helper_socket:="/var/run/fwd-helper.sock"}
+# The account fwd runs as. Socket permissions are the primary control; the
+# helper additionally takes the caller's uid from the kernel and checks it
+# against this. Empty means root-only, which is correct while fwd is still
+# root and wrong the moment it is not.
+: ${fwd_helper_peer:=""}
+: ${fwd_helper_group:=""}
+: ${fwd_helper_window:="60s"}
+# Accounts the web terminal may run as. This list lives here, on the privileged
+# side, and not in the config document — fwd names an account when it asks, and
+# fwd-helper decides. That is what stops a compromised web daemon (or a restored
+# backup) from obtaining a root terminal. Empty disables the web terminal
+# outright, whatever the UI says.
+#
+# A root web terminal is therefore a console action:
+#   sysrc fwd_helper_shell_users=root && service fwd-helper restart
+: ${fwd_helper_shell_users:=""}
+: ${fwd_helper_shell_sessions:="1"}
+: ${fwd_helper_log:="/var/log/fwd-helper.log"}
+
+pidfile="/var/run/fwd_helper.pid"
+procname="/usr/local/sbin/fwd-helper"
+
+# fwd-helper runs in the foreground and never daemonises itself, so daemon(8)
+# does it — the same shape as the fwd script next to this one. It stays root:
+# writing /etc, running pfctl and forking terminals is its entire purpose.
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -t fwd-helper -o ${fwd_helper_log}"
+command_args="${command_args} ${procname} -socket ${fwd_helper_socket} -confirm-window ${fwd_helper_window}"
+[ -n "${fwd_helper_peer}" ] && command_args="${command_args} -peer-user ${fwd_helper_peer}"
+[ -n "${fwd_helper_shell_users}" ] && command_args="${command_args} -shell-user ${fwd_helper_shell_users} -shell-sessions ${fwd_helper_shell_sessions}"
+[ -n "${fwd_helper_group}" ] && command_args="${command_args} -socket-group ${fwd_helper_group}"
+
+start_precmd="fwd_helper_prestart"
+
+fwd_helper_prestart()
+{
+	[ -f "${fwd_helper_log}" ] || : > "${fwd_helper_log}"
+	chmod 0640 "${fwd_helper_log}"
+	return 0
+}
+
+run_rc_command "$1"

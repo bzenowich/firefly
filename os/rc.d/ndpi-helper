@@ -1,0 +1,67 @@
+#!/bin/sh
+#
+# rc.d script for ndpi-helper, the flow classifier.
+#
+# It links libpcap and libnDPI and points them at raw frames off the WAN, which
+# makes it the most likely thing on this appliance to be exploitable
+# (docs/security-plan.md SEC-2a). It therefore runs as its own account: root
+# only long enough to open the bpf devices and the label socket, then an
+# irreversible drop to ndpi_helper_user before a single packet is parsed.
+#
+# It is a service rather than a child of fwd because fwd is unprivileged after
+# the split and cannot fork anything as another account — and because a C
+# parser handling hostile input should not inherit the web daemon's identity
+# either.
+#
+# PROVIDE: ndpi-helper
+# REQUIRE: FILESYSTEMS fwd
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=ndpi_helper
+rcvar=ndpi_helper_enable
+
+load_rc_config $name
+
+: ${ndpi_helper_enable:="NO"}
+# The account to drop to. Empty means stay root, which this script warns about
+# rather than silently accepting.
+: ${ndpi_helper_user:="_fwdpcap"}
+# Shared with fwd's label server: fwd owns it, this account is its group, mode
+# 0660. It lives in /var/run rather than fwd's state directory because that
+# directory is mode 0700 and the two run as different accounts.
+: ${ndpi_helper_socket:="/var/run/fwd/ndpi.sock"}
+# Capture devices, comma-separated. Empty means the helper idles — it does not
+# guess, because capturing on the wrong interface is a silent wrong answer.
+: ${ndpi_helper_devices:=""}
+: ${ndpi_helper_log:="/var/log/ndpi-helper.log"}
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/sbin/ndpi-helper"
+
+# daemon(8) forks and owns the pidfile; the privilege drop is the helper's own,
+# not daemon's -u, because it must happen *after* bpf is open, not before.
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -t ndpi-helper -o ${ndpi_helper_log}"
+command_args="${command_args} ${procname} -socket ${ndpi_helper_socket}"
+[ -n "${ndpi_helper_user}" ] && command_args="${command_args} -user ${ndpi_helper_user}"
+[ -n "${ndpi_helper_devices}" ] && command_args="${command_args} -devices ${ndpi_helper_devices}"
+
+start_precmd="ndpi_helper_prestart"
+
+ndpi_helper_prestart()
+{
+	[ -x "${procname}" ] || err 1 "${procname} is not installed; see os/build-ndpi-helper.sh"
+	if [ -z "${ndpi_helper_devices}" ]; then
+		warn "ndpi_helper_devices is empty: the classifier will capture nothing"
+	fi
+	if [ -z "${ndpi_helper_user}" ]; then
+		warn "ndpi_helper_user is empty: the packet parser will keep running as root"
+	fi
+	[ -f "${ndpi_helper_log}" ] || : > "${ndpi_helper_log}" || err 1 "cannot create ${ndpi_helper_log}"
+	chmod 0640 "${ndpi_helper_log}"
+	return 0
+}
+
+run_rc_command "$1"
