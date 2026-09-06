@@ -11,20 +11,18 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
-	"firewall/ui/internal/apply"
 	"firewall/ui/internal/cert"
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
+	"firewall/ui/internal/privsep"
 	"firewall/ui/internal/server"
 	"firewall/ui/internal/traffic"
 )
@@ -33,8 +31,14 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8443", "HTTPS listen address")
 	httpListen := flag.String("http", "", "optional HTTP listen address that redirects to HTTPS (e.g. :80)")
 	confPath := flag.String("config", "fw.json", "path to config file")
-	window := flag.Duration("confirm-window", time.Minute, "auto-rollback window after apply (0 = no confirmation step)")
+	helperSocket := flag.String("helper-socket", "/var/run/fwd-helper.sock", "unix socket of the privileged helper (fwd-helper)")
+	labelSocket := flag.String("label-socket", "", "unix socket the ndpi-helper streams app labels to (default: next to the config)")
+	labelPeer := flag.String("label-peer", "", "account the ndpi-helper runs as; restricts the label socket to it (recommended: _fwdpcap)")
 	flag.Parse()
+
+	if err := os.Setenv("PATH", appliancePath); err != nil {
+		log.Fatalf("setting PATH: %v", err)
+	}
 
 	store, err := config.Open(*confPath)
 	if err != nil {
@@ -44,6 +48,12 @@ func main() {
 	// Self-signed TLS identity lives next to the config file; generated at
 	// first boot, stable afterwards so the browser exception sticks.
 	dir := filepath.Dir(*confPath)
+	if *labelSocket == "" {
+		// Default next to the other state. On the appliance rc.d puts it in
+		// /var/run instead, because the state directory is mode 0700 and the
+		// classifier runs as a different account.
+		*labelSocket = filepath.Join(dir, "fw-ndpi.sock")
+	}
 	cfg := store.Get()
 	var ips []net.IP
 	if lan := cfg.LAN(); lan.IPv4 != "" {
@@ -58,14 +68,28 @@ func main() {
 		log.Fatalf("tls: %v", err)
 	}
 
-	// Off-FreeBSD, apply renders into ./devroot and logs service commands
-	// instead of executing them, so the pipeline is exercisable on a dev box.
-	sys := apply.OSSystem{}
-	if runtime.GOOS != "freebsd" {
-		sys = apply.OSSystem{Root: "devroot", NoExec: true}
-		log.Printf("non-FreeBSD host: apply writes to ./devroot, commands logged only")
-	}
-	mgr := apply.New(sys, *window)
+	// The privileged boundary (internal/privsep). Every privileged operation
+	// goes to fwd-helper; this process performs none itself and holds no
+	// privilege with which to try.
+	//
+	// There is deliberately no in-process fallback. One existed while the split
+	// was being brought up (docs/security-plan.md §3.5) and it is gone: a
+	// fallback is a way for a misconfiguration to silently produce a root web
+	// daemon, which is the exact outcome the split exists to prevent. If the
+	// helper is unreachable, privileged operations fail with a message saying
+	// so — loudly, and without doing them.
+	//
+	// The practical consequence for development is that fwd needs fwd-helper
+	// alongside it. That is a feature: it is the same path the appliance runs,
+	// and `fwd-helper -root ./devroot -noexec` gives a dev box the whole
+	// pipeline without touching the system.
+	client := privsep.NewClient(*helperSocket)
+	var (
+		priv  privsep.Ops         = client
+		shell privsep.ShellOpener = client
+		wgSt  privsep.WGStatus    = client
+	)
+	log.Printf("privileged operations go to fwd-helper at %s", *helperSocket)
 
 	// Log ring buffer lives next to the config; collectors only exist on
 	// FreeBSD (tcpdump on pflog0, tail on syslog files).
@@ -105,9 +129,14 @@ func main() {
 	// at insert (docs/ndpi-helper-design.md). The socket lives next to the other
 	// state files so it is writable on dev and appliance alike.
 	labelCache := flow.NewLabelCache()
-	flowSocket := filepath.Join(dir, "fw-ndpi.sock")
+	labelSrv := flow.NewLabelServer(*labelSocket, labelCache, flowStore)
+	if *labelPeer != "" {
+		// The classifier runs as its own account, so the socket is shared with
+		// exactly that one and connections from anything else are refused.
+		labelSrv = labelSrv.WithPeer(*labelPeer)
+	}
 	go func() {
-		if err := flow.NewLabelServer(flowSocket, labelCache, flowStore).Run(collectCtx); err != nil {
+		if err := labelSrv.Run(collectCtx); err != nil {
 			log.Printf("flow label server: %v", err)
 		}
 	}()
@@ -117,24 +146,42 @@ func main() {
 		}
 	}()
 
-	// fwd owns the helper process. It links libnDPI/libpcap, so it runs only on
-	// the appliance and only while baseline flow is enabled; on a dev box the
-	// LabelServer still runs, so a stub helper can drive the pipeline.
-	if runtime.GOOS == "freebsd" && cfg.Flow.Enabled {
-		go superviseHelper(collectCtx, flowSocket, flowDevices(cfg))
-	}
+	// ndpi-helper is NOT started here. It is its own rc.d service
+	// (os/rc.d/ndpi-helper) running as _fwdpcap, because fwd is unprivileged
+	// after the split and cannot fork anything as another account — and
+	// because a libnDPI process parsing hostile frames should not inherit the
+	// web daemon's identity either (docs/security-plan.md SEC-2a). fwd's only
+	// relationship to it is the label socket the LabelServer above listens on.
 
-	srv, err := server.New(store, mgr, logStore, trafStore, flowStore)
+	srv, err := server.New(store, priv, shell, wgSt, logStore, trafStore, flowStore)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
 
+	// Timeout policy (design-review §4.3). ReadTimeout/WriteTimeout arm absolute
+	// deadlines on the connection the moment a request starts, which is wrong for
+	// the two long-lived routes: the web shell hijacks its connection for a whole
+	// terminal session, and the ntopng proxy relays responses of unknown length.
+	// Both clear their own deadlines with http.ResponseController before they
+	// take over the connection, so the blanket values stay as the default for
+	// every ordinary page. ReadHeaderTimeout bounds the slow-header attack on its
+	// own; IdleTimeout reaps kept-alive connections.
+	//
+	// NextProtos pins HTTP/1.1: ListenAndServeTLS would otherwise negotiate
+	// HTTP/2, whose ResponseWriter implements neither Hijacker (the web shell's
+	// WebSocket upgrade needs it) nor deadline control.
 	httpSrv := &http.Server{
-		Addr:         *listen,
-		Handler:      srv,
-		TLSConfig:    &tls.Config{Certificates: []tls.Certificate{tlsCert}, MinVersion: tls.VersionTLS12},
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:    *listen,
+		Handler: srv,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"http/1.1"},
+		},
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	go func() {
@@ -169,44 +216,16 @@ func main() {
 	}
 }
 
-// flowDevices is the capture device list passed to the ndpi-helper: the device
-// names of the interfaces baseline flow monitors (all, by default).
-func flowDevices(cfg config.Config) []string {
-	var devs []string
-	for _, ifc := range cfg.Interfaces {
-		if ifc.Device != "" && cfg.Flow.IsMonitored(ifc.Name) {
-			devs = append(devs, ifc.Device)
-		}
-	}
-	return devs
-}
-
-// superviseHelper runs the ndpi-helper as a supervised child: start it, restart
-// with a short backoff if it exits, and stop it when ctx is cancelled. The
-// helper is found on PATH (installed by the OS image); if it is absent the
-// feature is simply skipped — app labels stay empty, the rest of visibility is
-// unaffected.
-func superviseHelper(ctx context.Context, socket string, devices []string) {
-	bin, err := exec.LookPath("ndpi-helper")
-	if err != nil {
-		log.Printf("flow: ndpi-helper not found on PATH; app labels disabled")
-		return
-	}
-	const backoff = 3 * time.Second
-	for ctx.Err() == nil {
-		args := []string{"-socket", socket}
-		if len(devices) > 0 {
-			args = append(args, "-devices", strings.Join(devices, ","))
-		}
-		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil && ctx.Err() == nil {
-			log.Printf("flow: ndpi-helper exited: %v; restarting in %s", err, backoff)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-	}
-}
+// appliancePath is the PATH this daemon runs external commands with.
+//
+// rc.d starts services through daemon(8), which passes on the boot environment:
+// PATH=/sbin:/bin:/usr/sbin:/usr/bin. Every package-installed tool the appliance
+// depends on lives outside that — kea-dhcp4 and unbound-checkconf in
+// /usr/local/sbin, wg in /usr/local/bin — so with the inherited PATH the very
+// first apply fails at the kea validator with "executable file not found", and
+// the WireGuard page silently reports no handshakes.
+//
+// It is set here, once, rather than at each exec site, so a command added later
+// cannot miss it. Found on the VM: it does not reproduce when the daemon is
+// started by hand from a login shell, which is how it stayed hidden.
+const appliancePath = "/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
