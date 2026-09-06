@@ -15,58 +15,5 @@
 
 <script src="/static/xterm.js"></script>
 <script src="/static/addon-fit.js"></script>
-<script>
-(function () {
-  "use strict";
-  var status = document.getElementById("shell-status");
-  function setStatus(t) { status.textContent = t; }
-
-  var term = new Terminal({
-    cursorBlink: true,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    fontSize: 13,
-    theme: { background: "#14181d", foreground: "#d8dee6" }
-  });
-  var fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(document.getElementById("term"));
-  fit.fit();
-
-  var proto = location.protocol === "https:" ? "wss:" : "ws:";
-  var ws = new WebSocket(proto + "//" + location.host + "/shell/ws");
-  ws.binaryType = "arraybuffer";
-  var enc = new TextEncoder();
-
-  function sendResize() {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
-    }
-  }
-
-  ws.onopen = function () {
-    setStatus("connected");
-    fit.fit();
-    sendResize();
-    term.focus();
-  };
-  ws.onmessage = function (e) {
-    // Binary frames are raw PTY output; control frames would arrive as text.
-    if (e.data instanceof ArrayBuffer) term.write(new Uint8Array(e.data));
-  };
-  ws.onclose = function () {
-    setStatus("disconnected — reload the page to start a new session");
-    term.write("\r\n\x1b[31m[disconnected]\x1b[0m\r\n");
-  };
-  ws.onerror = function () { setStatus("connection error"); };
-
-  // Keystrokes -> PTY as binary frames.
-  term.onData(function (d) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(enc.encode(d));
-  });
-  term.onResize(sendResize);
-  window.addEventListener("resize", function () {
-    fit.fit();
-  });
-})();
-</script>
+<script src="/static/shell.js"></script>
 {{end}}

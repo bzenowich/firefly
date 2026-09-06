@@ -12,6 +12,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -21,12 +22,12 @@ import (
 	"sync"
 	"time"
 
-	"firewall/ui/internal/apply"
 	"firewall/ui/internal/auth"
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/devices"
 	"firewall/ui/internal/flow"
 	"firewall/ui/internal/logs"
+	"firewall/ui/internal/privsep"
 	"firewall/ui/internal/render"
 	"firewall/ui/internal/system"
 	"firewall/ui/internal/traffic"
@@ -70,6 +71,47 @@ const (
 	// over — a day, which is what "how much has this thing used" means to an
 	// admin looking at the table.
 	deviceUsageRange = "day"
+
+	// Request body ceilings (docs/security-plan.md SEC-4b). Nothing bounded
+	// request bodies before this. r.FormValue on a multipart request calls
+	// ParseMultipartForm, which buffers 32 MiB and then spills the remainder to
+	// temp files with *no total cap* — and /login is public and calls
+	// FormValue, so a LAN host with no credentials could fill the filesystem.
+	//
+	// Every form on the appliance is a handful of short fields; 64 KiB is
+	// generous for all of them. The config document is the one real upload.
+	maxBodyBytes   = 64 << 10
+	maxUploadBytes = 8 << 20
+
+	// contentSecurityPolicy is the page-level containment for the admin UI
+	// (docs/security-plan.md SEC-8).
+	//
+	//   script-src 'self'      — no inline script anywhere; every page's JS
+	//                            lives under /static. This is the directive
+	//                            that matters, and the reason the templates'
+	//                            inline <script> blocks were moved out.
+	//   frame-ancestors 'self' — the clickjacking defense CSRF tokens do not
+	//                            provide: a token the attacker never has to
+	//                            read is no help against a framed UI and a
+	//                            tricked click. 'self' rather than 'none'
+	//                            because the Visibility page frames the
+	//                            same-origin ntopng proxy.
+	//   style-src adds 'unsafe-inline' — xterm.js builds its terminal styling
+	//                            by injecting <style> elements at runtime,
+	//                            which CSP governs. Inline *style* is a far
+	//                            weaker vector than inline script, and this is
+	//                            the price of not vendoring a patched xterm.
+	//   img-src adds data:     — ntopng's UI, which we proxy but do not own.
+	contentSecurityPolicy = "default-src 'self'; " +
+		"script-src 'self'; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data:; " +
+		"font-src 'self' data:; " +
+		"connect-src 'self'; " +
+		"frame-ancestors 'self'; " +
+		"form-action 'self'; " +
+		"base-uri 'none'; " +
+		"object-src 'none'"
 )
 
 // errInvalidLogin is the single failure message the login form ever shows. A
@@ -78,8 +120,20 @@ const (
 var errInvalidLogin = errors.New("invalid username, password, or code")
 
 type Server struct {
-	store     *config.Store
-	mgr       *apply.Manager
+	store *config.Store
+	// priv is the privileged boundary (internal/privsep). The server holds the
+	// interface, not apply.Manager, so that when the root helper lands the only
+	// thing that changes here is which implementation main.go constructs.
+	priv privsep.Ops
+	// shell opens web terminals through that same boundary. It is separate from
+	// priv because the two are unrelated capabilities: an appliance may have
+	// the config pipeline without the terminal, and nil here means the feature
+	// is unavailable however the config document is set.
+	shell privsep.ShellOpener
+	// wg reads live WireGuard peer state through the same boundary. Nil means
+	// the WireGuard page reports "never" for every client, which is what an
+	// appliance with no way to ask should say.
+	wg        privsep.WGStatus
 	logStore  *logs.Store
 	traffic   *traffic.Store
 	flow      *flow.Store
@@ -127,10 +181,12 @@ func contains(list []string, v string) bool {
 	return false
 }
 
-func New(store *config.Store, mgr *apply.Manager, logStore *logs.Store, trafStore *traffic.Store, flowStore *flow.Store) (*Server, error) {
+func New(store *config.Store, priv privsep.Ops, shell privsep.ShellOpener, wg privsep.WGStatus, logStore *logs.Store, trafStore *traffic.Store, flowStore *flow.Store) (*Server, error) {
 	s := &Server{
 		store:        store,
-		mgr:          mgr,
+		priv:         priv,
+		shell:        shell,
+		wg:           wg,
 		logStore:     logStore,
 		traffic:      trafStore,
 		flow:         flowStore,
@@ -240,7 +296,18 @@ type userKey struct{}
 // ServeHTTP gates every route behind session auth. LAN-only bind plus this
 // check is the v1 security boundary (plan.md §7). TOTP still TODO.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w, r)
+	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 	if isPublic(r.URL.Path) {
+		// The pre-session forms are the only place an unauthenticated caller
+		// reaches a body parser, so they take the narrowest possible one: a
+		// short urlencoded form and nothing else. Refusing multipart outright
+		// closes the temp-file spill without depending on the size cap above
+		// (docs/security-plan.md SEC-4b).
+		if r.Method == http.MethodPost && !isURLEncodedForm(r) {
+			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+			return
+		}
 		s.mux.ServeHTTP(w, r)
 		return
 	}
@@ -256,10 +323,57 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
+	if !s.parseBody(w, r) {
+		return
+	}
 	if !s.checkCSRF(w, r) {
 		return
 	}
 	s.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
+}
+
+// parseBody parses a state-changing request's form up front, writing the
+// refusal itself and reporting whether the request may proceed.
+//
+// It exists so that a body truncated by the MaxBytesReader in ServeHTTP is a
+// visible error rather than a silent one. Handlers read fields with
+// r.FormValue, which discards the parse error and returns "" — so an oversized
+// POST used to reach a handler as a form full of empty strings and *write them*.
+// For /system/hostname that surfaced as a confusing "hostname is required"; for
+// /system/smtp it would have quietly blanked the relay. Failing here means a
+// handler either sees the whole form or never runs (docs/security-plan.md
+// SEC-4b).
+func (s *Server) parseBody(w http.ResponseWriter, r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	// The web shell hijacks its connection and the ntopng proxy streams a body
+	// we must pass through untouched; neither is a form.
+	if r.URL.Path == "/shell/ws" || strings.HasPrefix(r.URL.Path, render.NtopngHTTPPrefix+"/") {
+		return true
+	}
+
+	var err error
+	if mediaType, _, e := mime.ParseMediaType(r.Header.Get("Content-Type")); e == nil &&
+		strings.HasPrefix(mediaType, "multipart/") {
+		// The in-memory bound is the route's whole body budget, so nothing ever
+		// spills to a temp file.
+		err = r.ParseMultipartForm(bodyLimit(r))
+	} else {
+		err = r.ParseForm()
+	}
+	if err == nil {
+		return true
+	}
+
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+		return false
+	}
+	http.Error(w, "malformed form data", http.StatusBadRequest)
+	return false
 }
 
 // checkCSRF enforces the synchronizer token on every state-changing request,
@@ -298,6 +412,53 @@ func (s *Server) checkCSRF(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// setSecurityHeaders applies the response-header half of the browser-side
+// containment (docs/security-plan.md SEC-8). None of these existed before, which
+// left the admin UI framable — and CSRF tokens are no defense against a framed
+// UI, since a forged click never needs to read the token.
+//
+// no-store is applied to everything except /static because on this UI it is
+// simply true: every page renders live config, and three routes hand out
+// outright secrets (the config backup with every hash, key and password in it;
+// a WireGuard client config containing its private key; the TOTP enrollment QR).
+// Enumerating those three invites forgetting the fourth.
+func setSecurityHeaders(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "SAMEORIGIN") // pre-CSP browsers; frame-ancestors supersedes it
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Content-Security-Policy", contentSecurityPolicy)
+	if !strings.HasPrefix(r.URL.Path, "/static/") {
+		h.Set("Cache-Control", "no-store")
+	}
+	if r.TLS != nil {
+		// Two years, no preload: this is a private name/address, so the
+		// preload list is neither available nor appropriate.
+		h.Set("Strict-Transport-Security", "max-age=63072000")
+	}
+}
+
+// bodyLimit is the request-body ceiling for a route. Only the config restore
+// legitimately carries more than a few short form fields.
+func bodyLimit(r *http.Request) int64 {
+	if r.URL.Path == "/system/restore" {
+		return maxUploadBytes
+	}
+	return maxBodyBytes
+}
+
+// isURLEncodedForm reports whether the request body is a plain HTML form post.
+// A POST with no Content-Type at all is treated as one, since that is what a
+// minimal client sends and the parser handles it.
+func isURLEncodedForm(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	return err == nil && mediaType == "application/x-www-form-urlencoded"
 }
 
 // isPublic lists the routes reachable without a session: the login/setup
@@ -536,7 +697,7 @@ func (s *Server) data(p Page, r *http.Request) pageData {
 		d.TOTPPending = s.totpPending[d.User] != ""
 		s.totpMu.Unlock()
 	}
-	d.ApplyDeadline, d.ApplyPending = s.mgr.Pending()
+	d.ApplyDeadline, d.ApplyPending = s.priv.Pending()
 	if p.Path == "/system" {
 		d.Timezones = config.Timezones()
 	}
@@ -666,15 +827,15 @@ func (s *Server) handlePFPreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, "/system", s.mgr.Apply(s.store.Get()))
+	redirect(w, r, "/system", s.priv.Apply(s.store.Get()))
 }
 
 func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, "/system", s.mgr.Confirm())
+	redirect(w, r, "/system", s.priv.Confirm())
 }
 
 func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
-	redirect(w, r, "/system", s.mgr.Rollback())
+	redirect(w, r, "/system", s.priv.Rollback())
 }
 
 // parseForward reads port-forward form fields; semantic checks (port range,

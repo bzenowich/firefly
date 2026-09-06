@@ -1,13 +1,4 @@
 {{define "content"}}
-<style>
-  .access-controls { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
-  .access-controls input[type=search] { flex: 1; min-width: 12rem; }
-  #svc-list { list-style: none; margin: 0; padding: 0; max-height: 28rem; overflow-y: auto; border: 1px solid var(--border, #ccc); border-radius: 4px; }
-  #svc-list li { padding: .35rem .6rem; border-bottom: 1px solid var(--border, #eee); }
-  #svc-list li:last-child { border-bottom: 0; }
-  #svc-list label { display: flex; gap: .6rem; align-items: baseline; margin: 0; cursor: pointer; }
-  #svc-list .svc-name { min-width: 10rem; }
-</style>
 
 <p><a href="/wireguard" class="button-link">&larr; WireGuard</a></p>
 <h1>Access — {{.Client.Email}}</h1>
@@ -17,16 +8,16 @@
 <form method="post" action="/wireguard/server/clients/{{.Client.ID}}">
   <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
   <div class="access-controls">
-    <input type="search" id="svc-filter" placeholder="Filter services…" oninput="filterSvc()" autocomplete="off">
-    <button type="button" class="secondary" onclick="setVisible(true)">Select shown</button>
-    <button type="button" class="secondary" onclick="setVisible(false)">Clear shown</button>
+    <input type="search" id="svc-filter" placeholder="Filter services…" autocomplete="off">
+    <button type="button" class="secondary" id="svc-select-shown">Select shown</button>
+    <button type="button" class="secondary" id="svc-clear-shown">Clear shown</button>
     <span id="svc-count" class="muted"></span>
   </div>
   <ul id="svc-list">
     {{range .Cfg.Services}}
     <li class="svc">
       <label class="check">
-        <input type="checkbox" name="service_ids" value="{{.ID}}" {{if contains $.Client.ServiceIDs .ID}}checked{{end}} onchange="updateCount()">
+        <input type="checkbox" name="service_ids" value="{{.ID}}" {{if contains $.Client.ServiceIDs .ID}}checked{{end}}>
         <span class="svc-name">{{.Name}}</span>
         <span class="mono muted">{{.IP}}:{{.Port}}/{{.Proto}}</span>
       </label>
@@ -36,29 +27,7 @@
   <p><button type="submit">Save access</button></p>
 </form>
 
-<script>
-  function rows() { return Array.prototype.slice.call(document.querySelectorAll('#svc-list .svc')); }
-  function filterSvc() {
-    var q = document.getElementById('svc-filter').value.toLowerCase();
-    rows().forEach(function (li) {
-      li.style.display = li.textContent.toLowerCase().indexOf(q) === -1 ? 'none' : '';
-    });
-  }
-  // Bulk actions apply to the currently shown (filtered) rows, so you can
-  // filter "web" then grant them all in one click.
-  function setVisible(on) {
-    rows().forEach(function (li) {
-      if (li.style.display !== 'none') li.querySelector('input').checked = on;
-    });
-    updateCount();
-  }
-  function updateCount() {
-    var boxes = document.querySelectorAll('#svc-list input[type=checkbox]');
-    var on = document.querySelectorAll('#svc-list input[type=checkbox]:checked').length;
-    document.getElementById('svc-count').textContent = on + ' of ' + boxes.length + ' granted';
-  }
-  updateCount();
-</script>
+<script src="/static/wg_access.js"></script>
 {{else}}
 <p class="muted">No services defined yet. Add some on the <a href="/services">Services</a> page first.</p>
 {{end}}

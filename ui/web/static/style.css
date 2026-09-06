@@ -242,3 +242,15 @@ main.login button { width: 100%; margin-top: 0.4rem; }
   .shell-term { height: 60vh; }
   .embed { height: 65vh; }
 }
+
+/* WireGuard per-client access editor (templates/pages/wg_access.html). Moved
+   out of the page's own <style> block when the CSP landed — style-src keeps
+   'unsafe-inline' only for what xterm.js injects at runtime, and there is no
+   reason for our own rules to lean on it (docs/security-plan.md SEC-8). */
+.access-controls { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+.access-controls input[type=search] { flex: 1; min-width: 12rem; }
+#svc-list { list-style: none; margin: 0; padding: 0; max-height: 28rem; overflow-y: auto; border: 1px solid var(--border, #ccc); border-radius: 4px; }
+#svc-list li { padding: .35rem .6rem; border-bottom: 1px solid var(--border, #eee); }
+#svc-list li:last-child { border-bottom: 0; }
+#svc-list label { display: flex; gap: .6rem; align-items: baseline; margin: 0; cursor: pointer; }
+#svc-list .svc-name { min-width: 10rem; }
