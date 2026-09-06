@@ -45,7 +45,7 @@ Add to `internal/config/config.go`:
 type Shell struct {
     Enabled     bool   `json:"enabled"`      // master switch, default false
     Shell       string `json:"shell"`        // "" => /bin/sh (login shell of target user)
-    User        string `json:"user"`         // target unix user; "" => root
+    User        string `json:"user"`         // target unix user; "" => unprivileged default
     IdleTimeout int    `json:"idleTimeout"`  // seconds of no I/O before kill; 0 => 15m default
     MaxSessions int    `json:"maxSessions"`  // concurrent ttys; 0 => 1
 }
@@ -63,26 +63,63 @@ be a direct `Store.Update` + immediate effect.
 
 ## 4. Privilege architecture (the load-bearing decision)
 
-The web process runs **non-root** (plan.md §7). A root login shell must not
-be a child of the web process, or the entire isolation story collapses. Two
-viable designs:
+**Built, 2026-09-05 — Option A** (docs/security-plan.md §3.5 step 3).
 
-**Option A — helper owns the PTY, passes the master fd back (recommended).**
-The existing root helper gains one method: `OpenShell(req) -> fd`. It
-`posix_openpt`s a PTY, `fork`/`exec`s the target shell as the target user on
-the slave side, and sends the **master fd** back to the web process over the
-helper's unix-domain socket using `SCM_RIGHTS` (`golang.org/x/sys/unix`
-already a dep). The web process then does the dumb byte-pump between that fd
-and the WebSocket. Privileged work (setuid, PTY creation) stays in the
-helper; the web process only ever shuttles bytes and never holds root.
+**Option A — helper owns the PTY, passes the master fd back.** `fwd-helper`
+exposes `OpenShell(req) -> fd` (`internal/privsep`, verb `shell`). It creates
+the PTY, `fork`/`exec`s the target shell as the target user, and sends the
+**master fd** back to the web process over its unix-domain socket using
+`SCM_RIGHTS`. The web process does the dumb byte-pump between that fd and the
+WebSocket. Privileged work (setuid, PTY creation, reaping) stays in the helper;
+the web process only ever shuttles bytes and never holds root.
+
+Two details that were not obvious until it was built:
+
+- **On a `SOCK_STREAM` socket the descriptor is delivered with a specific byte
+  of the stream**, so it is sent alongside one payload byte and the receiver
+  must `recvmsg` at exactly that point. The framed response is therefore read
+  with exact-length reads and no buffering — a `bufio.Reader` reading ahead
+  would swallow the byte the descriptor is attached to, and with it the
+  descriptor.
+- **The session's lifetime is tied to the connection.** The helper holds the
+  request connection open, unread, for as long as the terminal lives; when fwd
+  exits or is killed, the kernel closes its end, the helper's read returns, and
+  it hangs up and reaps. A terminal cannot outlive the process that asked for
+  it, so a crashed fwd cannot leave shells running on the appliance. Verified
+  by killing fwd mid-session and watching the shell go with it.
 
 **Option B — helper owns the whole bridge.** Helper spawns the shell *and*
 proxies bytes over its socket to the web process, which relays to the WS.
-Simpler fd handling but puts a byte loop in the privileged binary and
-doubles the copy. Prefer A.
+Simpler fd handling but puts a byte loop in the privileged binary and doubles
+the copy. Not taken.
 
 In both cases the web process is the only thing touching the network; the
 helper has no socket exposed beyond its local AF_UNIX control channel.
+
+### 4a. Who decides the account (changed when the split landed)
+
+The target account used to come from `Shell.User` in the config document — and
+the config document is sent by fwd. If the helper simply honoured it, a
+compromised or buggy fwd would ask for root and get it, which would make the
+whole privilege split decorative.
+
+So the permitted set now lives **in the privileged process**, configured
+out-of-band by the operator:
+
+```sh
+sysrc fwd_helper_shell_users="nobody"   # what a terminal may run as
+service fwd-helper restart
+```
+
+Empty (the default) means the appliance serves no web terminal at all, whatever
+the UI says. fwd names an account when it asks; `fwd-helper` decides whether it
+gets one, and fwd cannot widen the list — nor can a restored backup.
+
+The practical consequence is deliberate: **a root web terminal now takes a
+console action**, not a checkbox in a browser. The config's `Shell.User` still
+selects *which* permitted account, so both sides must agree; when they do not,
+the refusal names both (`"nobody" is not among the accounts this appliance
+permits a terminal as (bz)`) rather than failing silently.
 
 PTY mechanics: use `github.com/creack/pty` (supports FreeBSD, ~one file of
 real code, no transitive deps) for `pty.Open` + `pty.Setsize`. Alternative
@@ -229,9 +266,16 @@ Both Go deps are small, pure-Go, and align with the single-binary goal.
 
 ## 13. Open questions
 
-- Target user model: always root, or the logged-in WebUI user mapped to a
-  unix account? v1 recommendation: a single configurable target user
-  (default root), since WebUI users are not unix users.
+- ~~Target user model~~ **DECIDED, then tightened:** a single configurable
+  target unix user, because WebUI users are not unix users — default
+  **unprivileged** (`nobody`), never root. An empty `user` resolves to that
+  default. A configured user that does not exist is a hard error, never a
+  silent fall back to root.
+
+  Tightened in the privilege split (§4a): the config document now only
+  *selects* among accounts `fwd-helper` permits, and the permitted set is
+  operator-configured on the appliance. Writing `"root"` into the config — or
+  restoring a backup that does — is no longer sufficient on its own.
 - `/usr/bin/login -f` (full login session, PAM/login.conf, MOTD) vs
   `/bin/sh -l` (lighter). Recommend `login -f` for a faithful console.
 - Should enabling the shell require re-auth or a TOTP step at the toggle?

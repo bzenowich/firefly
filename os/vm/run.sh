@@ -11,8 +11,10 @@ cd "$(dirname "$0")"
 
 [ -f fwtest.qcow2 ] || { echo "no fwtest.qcow2 — run ./fetch.sh first" >&2; exit 1; }
 
+. ./qemu-accel.sh
+
 exec qemu-system-x86_64 \
-	-machine q35,accel=kvm -cpu host -smp 2 -m 2048 \
+	-machine "q35,$QEMU_ACCEL" -cpu "$QEMU_CPU" -smp 2 -m 2048 \
 	-drive file=fwtest.qcow2,if=virtio,format=qcow2 \
 	-nic "user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8444-:8443" \
 	-nic socket,model=virtio-net-pci,listen=127.0.0.1:9101 \

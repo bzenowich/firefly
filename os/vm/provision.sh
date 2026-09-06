@@ -11,7 +11,8 @@ cd "$(dirname "$0")"
 
 [ -f fwtest.qcow2 ] || { echo "no fwtest.qcow2 — run ./fetch.sh first" >&2; exit 1; }
 
-KEY=$(cat "$HOME/.ssh/id_ed25519.pub")
+. ./vmkey.sh
+KEY=$(cat "$VM_PUBKEY")
 
 # Seed config: config.Default() with the three igc* devices remapped to this
 # VM's vtnet* NICs. Kept in sync with internal/config.Default() by hand — a test
@@ -67,12 +68,14 @@ printf 'pass all\n' > /etc/pf.conf
 rm -f /root/fw.b64
 $FW_WRITE
 openssl base64 -d -A < /root/fw.b64 > /root/fw.json && rm -f /root/fw.b64
-pkg install -y kea unbound wireguard-tools redis ntopng
+pkg install -y kea unbound wireguard-tools ca_root_nss redis ntopng
 poweroff
 EOF
 
+. ./qemu-accel.sh
+
 qemu-system-x86_64 \
-	-machine q35,accel=kvm -cpu host -smp 2 -m 2048 \
+	-machine "q35,$QEMU_ACCEL" -cpu "$QEMU_CPU" -smp 2 -m 2048 \
 	-drive file=fwtest.qcow2,if=virtio,format=qcow2 \
 	-nic user,model=virtio-net-pci \
 	-display none -serial unix:console.sock,server,nowait \
