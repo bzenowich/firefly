@@ -72,6 +72,38 @@ func WriteLabel(w io.Writer, l Label) error {
 	return err
 }
 
+// maxAppLen bounds an app label. nDPI's longest real verdicts are well inside
+// this ("TLS.GoogleServices" is 18); anything longer is not a protocol name.
+const maxAppLen = 64
+
+// SanitizeApp constrains an app label to what a protocol name can be, returning
+// "" for anything else.
+//
+// The label is derived from attacker-controlled bytes: nDPI reads it out of a
+// TLS SNI or an HTTP Host header, which is to say out of whatever the remote
+// end chose to send. It then travels to the admin's browser and into the flow
+// database. Constraining it at ingest means every consumer downstream — the
+// Visibility page's JavaScript, a future export, a log line — is handling a
+// protocol name rather than a hostile string, and none of them has to remember
+// that (docs/security-plan.md SEC-13).
+//
+// Rejecting rather than escaping is deliberate: an app label that needs
+// escaping is not an app label.
+func SanitizeApp(app string) string {
+	if app == "" || len(app) > maxAppLen {
+		return ""
+	}
+	for _, r := range app {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == '+' || r == '/':
+		default:
+			return ""
+		}
+	}
+	return app
+}
+
 // ReadLabels decodes an NDJSON Label stream, calling fn for each record until
 // the reader ends or fn returns an error. Malformed lines are skipped so one
 // bad record never tears down the stream; a fatal read error is returned.
@@ -86,6 +118,11 @@ func ReadLabels(r io.Reader, fn func(Label) error) error {
 		var l Label
 		if err := json.Unmarshal(line, &l); err != nil {
 			continue // skip malformed line
+		}
+		// Sanitize here rather than at each consumer: this is the one place
+		// every label enters the system.
+		if l.App = SanitizeApp(l.App); l.App == "" {
+			continue
 		}
 		if err := fn(l); err != nil {
 			return err

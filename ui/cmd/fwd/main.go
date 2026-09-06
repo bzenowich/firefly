@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -28,7 +29,7 @@ import (
 )
 
 func main() {
-	listen := flag.String("listen", "127.0.0.1:8443", "HTTPS listen address")
+	listen := flag.String("listen", "127.0.0.1:8443", `HTTPS listen address, or "auto" for the LAN address`)
 	httpListen := flag.String("http", "", "optional HTTP listen address that redirects to HTTPS (e.g. :80)")
 	confPath := flag.String("config", "fw.json", "path to config file")
 	helperSocket := flag.String("helper-socket", "/var/run/fwd-helper.sock", "unix socket of the privileged helper (fwd-helper)")
@@ -66,6 +67,19 @@ func main() {
 		cfg.System.Hostname, ips)
 	if err != nil {
 		log.Fatalf("tls: %v", err)
+	}
+
+	// "auto" binds the LAN address rather than every interface. The admin UI
+	// on 0.0.0.0 was reachable from the WAN and invisible only because pf
+	// blocked it first; not listening there is a property of the process
+	// rather than of the ruleset (docs/security-plan.md SEC-5).
+	if *listen == "auto" {
+		addr, err := autoListen(cfg)
+		if err != nil {
+			log.Fatalf("listen=auto: %v", err)
+		}
+		*listen = addr
+		log.Printf("binding the LAN address only: %s", *listen)
 	}
 
 	// The privileged boundary (internal/privsep). Every privileged operation
@@ -175,8 +189,23 @@ func main() {
 		Handler: srv,
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{tlsCert},
-			MinVersion:   tls.VersionTLS12,
-			NextProtos:   []string{"http/1.1"},
+			// TLS 1.2 is the floor rather than 1.3 because the appliance is
+			// managed from whatever browser the owner has, and an admin locked
+			// out of their firewall by a handshake failure is a worse outcome
+			// than a 1.2 session. The cipher list is what makes 1.2 acceptable:
+			// AEAD suites with forward secrecy only, so the weak end of what
+			// 1.2 permits is not on offer (docs/security-plan.md SEC-17).
+			// CipherSuites is ignored for 1.3, whose suites are all acceptable.
+			MinVersion: tls.VersionTLS12,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			},
+			NextProtos: []string{"http/1.1"},
 		},
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -193,13 +222,21 @@ func main() {
 
 	if *httpListen != "" {
 		_, port, _ := net.SplitHostPort(*listen)
+		// The redirect target is the appliance's own address, never the Host
+		// the client sent.
+		//
+		// Echoing r.Host meant an attacker could hand someone a link to the
+		// firewall's HTTP port carrying any Host they liked and have the
+		// appliance itself issue the redirect to it — the firewall lending its
+		// name to somewhere else, with a 301 the browser then caches
+		// (docs/security-plan.md SEC-17). The LAN address is the one the admin
+		// reaches the box on; the hostname is a fallback for a box whose LAN
+		// address is not yet configured.
+		target := redirectHost(store.Get())
 		go func() {
 			err := http.ListenAndServe(*httpListen, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				host, _, err := net.SplitHostPort(r.Host)
-				if err != nil {
-					host = r.Host
-				}
-				http.Redirect(w, r, "https://"+net.JoinHostPort(host, port)+r.URL.RequestURI(), http.StatusMovedPermanently)
+				http.Redirect(w, r, "https://"+net.JoinHostPort(target, port)+r.URL.RequestURI(),
+					http.StatusFound)
 			}))
 			log.Fatalf("http redirect listener: %v", err)
 		}()
@@ -229,3 +266,38 @@ func main() {
 // cannot miss it. Found on the VM: it does not reproduce when the daemon is
 // started by hand from a login shell, which is how it stayed hidden.
 const appliancePath = "/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+
+// redirectHost is the appliance's own name for the HTTP->HTTPS redirect: its
+// LAN address, or its hostname when the LAN has no address yet.
+func redirectHost(cfg config.Config) string {
+	if lan := cfg.LAN(); lan.IPv4 != "" {
+		if ip, _, err := net.ParseCIDR(lan.IPv4); err == nil {
+			return ip.String()
+		}
+	}
+	if cfg.System.Hostname != "" {
+		return cfg.System.Hostname
+	}
+	return "127.0.0.1"
+}
+
+// autoListen resolves the LAN address to bind, with the WebUI's port.
+//
+// It is an error rather than a fallback to 0.0.0.0 when the LAN has no address:
+// silently binding everything is the behaviour this exists to remove, and doing
+// it as a "helpful" fallback is how it would come back.
+func autoListen(cfg config.Config) (string, error) {
+	lan := cfg.LAN()
+	if lan.IPv4 == "" {
+		return "", fmt.Errorf("the lan interface has no address yet; set one, or pass an explicit -listen")
+	}
+	ip, _, err := net.ParseCIDR(lan.IPv4)
+	if err != nil {
+		return "", fmt.Errorf("lan address %q: %w", lan.IPv4, err)
+	}
+	port := 8443
+	if ports := cfg.System.Management.ManagementPorts(); len(ports) > 0 {
+		port = ports[0]
+	}
+	return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
+}

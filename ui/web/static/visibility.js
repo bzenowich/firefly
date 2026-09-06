@@ -19,31 +19,69 @@
     var d = new Date(t * 1000), p = function (n) { return (n < 10 ? "0" : "") + n; };
     return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
   }
-  function esc(s) {
-    return String(s).replace(/[&<>]/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c];
-    });
+  // Rows are built as DOM nodes, never as HTML strings.
+  //
+  // Everything in this table comes off the wire: hostnames from DNS, app labels
+  // that nDPI read out of a TLS SNI or an HTTP Host header — that is, out of
+  // whatever a remote server chose to send. This page previously assembled
+  // markup and passed it through a local escaper covering & < >, which is
+  // sufficient for text position and silently is not the moment anyone moves a
+  // value into an attribute. textContent cannot be got wrong that way
+  // (docs/security-plan.md SEC-13).
+  //
+  // The labels are also constrained at ingest (flow.SanitizeApp); this is the
+  // second of the two defenses, and the one that survives someone adding a
+  // column.
+  function cell(text, cls) {
+    var td = document.createElement("td");
+    td.textContent = text;
+    if (cls) td.className = cls;
+    return td;
   }
-  function fill(id, rows) {
+
+  function row(cells) {
+    var tr = document.createElement("tr");
+    cells.forEach(function (td) { tr.appendChild(td); });
+    return tr;
+  }
+
+  function emptyRow(cols) {
+    var tr = document.createElement("tr");
+    var td = cell("no data yet", "muted");
+    td.colSpan = cols;
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function fill(id, rows, cols) {
     var body = document.querySelector("#" + id + " tbody");
-    body.innerHTML = rows.length ? rows.join("") :
-      '<tr><td colspan="6" class="muted">no data yet</td></tr>';
+    body.replaceChildren.apply(body, rows.length ? rows : [emptyRow(cols)]);
   }
 
   function render(d) {
     fill("flow-talkers", (d.talkers || []).map(function (t) {
-      return "<tr><td>" + esc(t.host) + "</td><td class='num'>" + fmtBytes(t.in) +
-        "</td><td class='num'>" + fmtBytes(t.out) + "</td><td class='num'>" +
-        fmtBytes(t.in + t.out) + "</td></tr>";
-    }));
+      return row([
+        cell(t.host),
+        cell(fmtBytes(t.in), "num"),
+        cell(fmtBytes(t.out), "num"),
+        cell(fmtBytes(t.in + t.out), "num"),
+      ]);
+    }), 4);
+
     fill("flow-apps", (d.apps || []).map(function (a) {
-      return "<tr><td>" + esc(a.app) + "</td><td class='num'>" + fmtBytes(a.bytes) + "</td></tr>";
-    }));
+      return row([cell(a.app), cell(fmtBytes(a.bytes), "num")]);
+    }), 2);
+
     fill("flow-recent", (d.recent || []).map(function (f) {
-      return "<tr><td>" + fmtTime(f.t) + "</td><td>" + esc(f.src) + ":" + f.sport +
-        "</td><td>" + esc(f.dst) + ":" + f.dport + "</td><td>" + fmtProto(f.proto) +
-        "</td><td class='num'>" + fmtBytes(f.bytes) + "</td><td class='num'>" + f.pkts + "</td></tr>";
-    }));
+      return row([
+        cell(fmtTime(f.t)),
+        cell(f.src + ":" + f.sport),
+        cell(f.dst + ":" + f.dport),
+        cell(fmtProto(f.proto)),
+        cell(fmtBytes(f.bytes), "num"),
+        cell(String(f.pkts), "num"),
+      ]);
+    }), 6);
   }
 
   function load() {
