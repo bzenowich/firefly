@@ -22,7 +22,7 @@ prosumer/SMB routing. Where Firewalla is ahead today is called out honestly.
 |---|---|---|
 | **Bet** | Ownership + transparency, no cloud | Convenience + intelligence via cloud |
 | **Platform** | Intel x86 (N150), FreeBSD + `pf` | 6-core ARM, custom Linux |
-| **RAM / storage** | 8 GB / NVMe | 2 GB / 16 GB eMMC |
+| **RAM / storage** | 16 GB / 256 GB NVMe (+16 GB eMMC recovery) | 2 GB / 16 GB eMMC |
 | **Ports / speed** | 3× 2.5GbE | 2× 1GbE |
 | **Management** | Self-hosted web UI + PWA | Mobile app only |
 | **Cloud / account** | None required | Required |
@@ -30,12 +30,12 @@ prosumer/SMB routing. Where Firewalla is ahead today is called out honestly.
 | **Config model** | Declarative file, atomic apply + 60 s auto-rollback | App/cloud state |
 | **OS updates** | ZFS boot environments (rollback) | OTA app push |
 | **Policy engine** | Service-catalog grants (no per-device rules yet) | Mature per-device rules + schedules |
-| **DPI / categories** | nDPI (planned) | Out-of-box app/category ID |
+| **DPI / categories** | nDPI app-ID **built** (helper process, baseline); no categories | Out-of-box app/category ID |
 | **Threat intel** | List-based only | Cloud-fed Active Protect (IDS-style) |
 | **QoS** | None yet | Smart Queue (bufferbloat) |
 | **Alerts** | Email/ntfy, on-VPN (no cloud push) | Rich push alarms |
 | **VPN** | WireGuard (server + S2S) | WireGuard + OpenVPN, + VPN client |
-| **Price** | $249–299 target | ~$319 |
+| **Price** | $329–379 launch → $279 at scale (proposed, `../plan.md` §9/§13) | ~$319 |
 | **Status** | Phase 0 (software) | Shipping, mature |
 | **Best for** | Prosumers/homelab/SMB who run their own gateway | Families/consumers wanting easy strong security |
 
@@ -45,10 +45,10 @@ prosumer/SMB routing. Where Firewalla is ahead today is called out honestly.
 
 | Feature | Luciola | Firewalla Purple |
 |---|---|---|
-| CPU | Intel N150 (4× Gracemont x86-64, 3.6 GHz) / Atom C1110 embedded SKU | 6-core ARM (4× Cortex-A53 + 2× Cortex-A73) |
+| CPU | Intel N150 (4× Gracemont x86-64, 3.6 GHz) / Atom x7425E embedded SKU (same ADL-N silicon, drop-in on the same PCB) | 6-core ARM (4× Cortex-A53 + 2× Cortex-A73) |
 | Architecture | x86-64 | ARMv8 (aarch64) |
-| RAM | 8 GB DDR4 (In-Band ECC where supported) | 2 GB DDR4 |
-| Storage | M.2 NVMe (+ optional 32 GB eMMC) | 16 GB eMMC |
+| RAM | **16 GB** soldered DDR4 (In-Band ECC where supported) — the ADL-N platform ceiling, stuffed on every unit | 2 GB DDR4 |
+| Storage | **256 GB M.2 NVMe** (+ optional **16 GB eMMC, recovery image only**) | 16 GB eMMC |
 | Network ports | **3× 2.5GbE** (i226-IT) | 2× 1GbE |
 | Inspection throughput | Multi-Gbps target (x86 + pf, validate in Phase 0) | ~1 Gbps |
 | Onboard WiFi | None in v1 (M.2 E-key unpopulated; AP is "bring your own") | 2×2 802.11ac, **short-range** (setup/backup only, not a real AP) |
@@ -104,8 +104,8 @@ Firewalla convenience Luciola does not match (Luciola is the gateway, period).
 | Remote management | Over the WireGuard tunnel you already run | Anywhere via cloud (more convenient) |
 | Account required | No | Yes (app account) |
 | Desktop management | Yes (browser) | No (mobile app only) |
-| Auth | Local users, argon2/bcrypt, TOTP, **passkeys/WebAuthn** | App-account auth |
-| Web terminal / shell | Optional ttyd behind auth (off by default) | None (SSH via support) |
+| Auth | Local users, argon2id, TOTP; **passkeys/WebAuthn (planned)** | App-account auth |
+| Web terminal / shell | Optional in-process web terminal (xterm.js over a WebSocket to a PTY in `fwd` — no second daemon), behind auth, off by default | None (SSH via support) |
 | Offline operation | Fully functional with zero internet | Degraded without cloud |
 
 **Read:** The core philosophical split. Firewalla's cloud app is **more
@@ -168,19 +168,25 @@ open problem (self-hosted feeds / ntfy-style).
 
 | Feature | Luciola | Firewalla Purple |
 |---|---|---|
-| Per-interface throughput | Dashboard sparklines + uPlot history | Real-time + history |
-| Flow logging | NetFlow/IPFIX from own interfaces (planned) | Built-in flow capture |
-| Deep packet inspection / app-ID | nDPI via ntopng, or native (design in `netflow.md`) | **DPI app/category ID** (mature, out-of-box) |
+| Per-interface throughput | Dashboard table + Traffic page history (SQLite → hand-rolled canvas) | Real-time + history |
+| Flow logging | **Built** — kernel `pflow(4)` IPFIX → Go collector → SQLite → native Flows UI | Built-in flow capture |
+| Deep packet inspection / app-ID | **Built** — libnDPI 5.0 in a separate helper process, app labels joined onto flows at baseline (`visibility-design.md`); ntopng + Redis is the opt-in power tier. No *categories* | **DPI app/category ID** (mature, out-of-box) |
 | East-west (host↔host) visibility | Only what it routes; honest topology tiering (§8) | Same gateway limitation; bridge mode helps |
-| Per-device usage breakdown | Planned | **Yes — strong, polished** |
-| Historical analytics | SQLite + uPlot, day/week/month | Cloud-assisted history |
+| Per-device usage breakdown | Device registry (MAC-keyed, ARP/NDP/lease join) built; the per-device UI is landing now — flows are still keyed by IP until it does | **Yes — strong, polished** |
+| Historical analytics | SQLite raw flows + minute/hour rollups, day/week/month | Cloud-assisted history |
 | Alarms / anomaly alerts | Email/ntfy (planned, no cloud push) | **Rich push alarms** (via cloud) |
 
-**Read:** Firewalla's out-of-box flow + DPI + per-device analytics with push
-alarms is its headline feature and is more mature. Luciola's plan (NetFlow + nDPI
-+ optional ntopng) can reach parity on *visibility* but the **no-cloud push**
-constraint makes off-VPN alerting genuinely harder (an open question in plan.md
-§13).
+**Read:** the gap here has narrowed, and it is worth being precise about where.
+Luciola's *pipeline* is built and on by default — kernel `pflow(4)` exports the pf
+state table as IPFIX, a Go collector writes raw flows plus per-host/per-app rollups
+to SQLite, and a separate libnDPI helper stamps app labels onto them, all with no
+Redis, no GPLv3 app, and no cloud. What Firewalla still has and Luciola does not is
+the layer *above* the pipeline: **per-device** attribution (Luciola's device registry
+is built but flows are still keyed by IP until the per-device UI lands), curated
+**categories** on top of raw app names, and **push alarms**. The first two are
+straight software; the third is genuinely constrained — the **no-cloud push**
+position makes off-VPN alerting hard by construction, and it is still an open
+question (plan.md §13).
 
 ## Software capabilities — deep dive
 
@@ -190,8 +196,9 @@ opposite architectures and the differences matter more than a checkbox grid show
 
 Luciola status below reflects what is **actually built** in the Go binary today
 (`../ui/`): pages for dashboard, interfaces/DHCP, services, NAT, DNS, WireGuard
-(+ per-client access), traffic, visibility, logs, shell, and system. Items still
-on the roadmap are marked **(planned)**.
+(+ per-client access), traffic, visibility (flows + top talkers + top apps), logs,
+shell, and system, plus the out-of-process nDPI helper. Items still on the roadmap
+are marked **(planned)**.
 
 ### Firewalla — the rule engine
 
@@ -269,13 +276,26 @@ applies atomically, and auto-rolls-back. This is built today:
 - **DHCP** — per-interface pools + static leases + lease table; built.
 - **DNS / Adblock** — Unbound settings, local overrides, blocklist management
   with per-list enable; built. (DoH upstream **planned**.)
-- **Traffic + Visibility** — throughput history (SQLite + hand-rolled
-  canvas/uPlot) built; deeper NetFlow/IPFIX + nDPI flow attribution is the
-  `netflow.md` design track **(planned)**.
+- **Traffic + Visibility** — both built. Per-interface throughput history (sampled
+  to SQLite, drawn with hand-rolled 2D canvas — no charting library), *and* the
+  baseline flow pipeline: kernel `pflow(4)` → Go IPFIX/NetFlow-v9 collector →
+  SQLite (raw flows + per-host/per-app rollups) → the native Flows view on the
+  Visibility page (top talkers, top apps, recent flows, `/api/flows`). App names
+  come from `cmd/ndpi-helper`, a separate process linking **libnDPI 5.0** over
+  libpcap and streaming `{5-tuple → app}` labels back over a unix socket — separate
+  precisely so LGPL never reaches the `fwd` binary. ntopng + Redis remains available
+  as the **opt-in power tier** behind the authenticated proxy, not a baseline
+  dependency. Design of record: `visibility-design.md` (`netflow.md` is superseded).
+  **Planned:** joining flows on *device* rather than IP, and per-device pages —
+  the registry exists, the UI is landing now.
 - **Logs** — live `pflog` tail + system log, filterable; built.
 - **System** — BE-based updates, single-file backup/restore, local users,
-  argon2 + TOTP (passkeys **planned**), certificates, **SMTP relay**, reboot;
-  built. Optional **web shell** (ttyd-style) behind auth, off by default.
+  argon2id + TOTP (passkeys/WebAuthn **planned** — no code today), certificates,
+  **SMTP relay**, reboot; built. Optional **web shell**, off by default and behind
+  the same session auth: xterm.js in the browser over a Go WebSocket bridged to a
+  PTY **inside `fwd` itself**, not ttyd or any reverse-proxied second daemon — one
+  listener, one credential surface, plus an Origin check, session cap, idle
+  watchdog, and audit ring (`shell.md`).
 
 The architectural cost (and the point): **none of this touches a cloud.** There
 are no curated category lists, no cloud threat-intel feed, no push service, and
@@ -289,7 +309,7 @@ UI that works with zero internet.
 | Capability | Stronger | Why |
 |---|---|---|
 | Per-device / per-group policy + schedules | **Firewalla** | Mature rule engine; Luciola has no device-policy model yet |
-| App / category identification | **Firewalla** | DPI + cloud-curated categories out of the box |
+| App / category identification | **Firewalla** | Both now run nDPI; Firewalla adds cloud-curated *categories* and per-device attribution on top, which is the part that sells |
 | Threat intelligence / IDS-style blocking | **Firewalla** | Cloud-fed Active Protect; Luciola is list-based only |
 | QoS / bufferbloat | **Firewalla** | Smart Queue shipping; Luciola has none yet |
 | Push alarms / actionable alerts | **Firewalla** | Cloud push; Luciola is constrained to email/ntfy (no cloud) |
@@ -314,7 +334,7 @@ for (plan.md §8, §13).
 
 | Feature | Luciola | Firewalla Purple |
 |---|---|---|
-| Price (retail) | $249–299 launch → ~$199 at scale (target) | ~$319 |
+| Price (retail) | **$329–379 launch → ~$279 at qty 1000+** (proposed; the old $249–299/$199 range died with the §2 16 GB/256 GB sizing — `../plan.md` §9, open in §13) | ~$319 |
 | Subscription | None | None for core; optional features cloud-tied |
 | Availability | Pre-product (Phase 0) | Shipping, mature |
 | Hardware longevity | ~10-yr embedded SoC + i226; second-sourced BOM | Consumer lifecycle |

@@ -117,3 +117,41 @@ func TestEngineCapsClassification(t *testing.T) {
 		t.Errorf("inspected %d packets, want cap %d", fe.state.Pkts, maxClassifyPkts)
 	}
 }
+
+func TestEngineCapsFlowTable(t *testing.T) {
+	sink := &recordSink{}
+	eng := NewEngine(newChanSource(0), stubClassifier{}, sink)
+	now := time.Now()
+	eng.now = func() time.Time { return now }
+	eng.maxFlows = 2 // maxFlows itself is 100k; the behavior is what matters
+
+	tracked := pkt("10.0.0.5", 51000, "1.1.1.1", 443, 6)
+	eng.handle(tracked)
+	eng.handle(pkt("10.0.0.5", 51001, "1.1.1.1", 443, 6))
+	// A third flow arrives with the table full and nothing idle enough to
+	// reclaim: it is refused, not tracked.
+	eng.handle(pkt("10.0.0.5", 51002, "1.1.1.1", 443, 6))
+	if len(eng.flows) != 2 {
+		t.Fatalf("flow table size %d, want 2 (capped)", len(eng.flows))
+	}
+	if eng.refused != 1 {
+		t.Errorf("refused = %d, want 1", eng.refused)
+	}
+
+	// Packets for a flow already tracked keep working while the table is full:
+	// this one is past labelRefresh, so it re-emits.
+	before := len(sink.labels)
+	now = now.Add(labelRefresh + time.Second)
+	eng.handle(tracked)
+	if len(sink.labels) != before+1 {
+		t.Errorf("tracked flow emitted %d labels, want %d", len(sink.labels), before+1)
+	}
+
+	// Once an entry goes quiet past pressureIdle, the pressure sweep reclaims
+	// it and a new flow is admitted again.
+	now = now.Add(pressureIdle + time.Second)
+	eng.handle(pkt("10.0.0.9", 40000, "1.1.1.1", 443, 6))
+	if _, ok := eng.flows[keyOf(pkt("10.0.0.9", 40000, "1.1.1.1", 443, 6))]; !ok {
+		t.Error("new flow not admitted after idle entries were reclaimed")
+	}
+}

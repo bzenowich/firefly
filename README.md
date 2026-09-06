@@ -16,7 +16,7 @@ OS image and WebUI development on COTS hardware.
 | `hw/carrier/` | Phase 2 KiCad project (SMARC/COMe carrier board) |
 | `hw/sbc/` | Phase 4 KiCad project (custom single-board design) |
 | `case/` | Enclosure CAD, DXF flat patterns |
-| `docs/` | User manual, build guides |
+| `docs/` | Design notes and rationale — visibility pipeline, nDPI helper, adblock, parental controls, web shell, competitive analysis, marketing. **No user manual yet** (a Phase 5 deliverable) |
 
 ## WebUI quickstart
 

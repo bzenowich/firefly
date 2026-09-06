@@ -30,10 +30,10 @@ func (s *Server) routesSystem() {
 	s.mux.HandleFunc("POST /system/time", s.handleSetTimezone)
 	s.mux.HandleFunc("POST /system/dns/servers", s.handleDNSServerAdd)
 	s.mux.HandleFunc("POST /system/dns/servers/delete", s.handleDNSServerDelete)
-	s.mux.HandleFunc("GET /system/dns/test", s.handleDNSTest)
+	s.mux.HandleFunc("POST /system/dns/test", s.handleDNSTest)
 	s.mux.HandleFunc("POST /system/ntp/servers", s.handleNTPServerAdd)
 	s.mux.HandleFunc("POST /system/ntp/servers/delete", s.handleNTPServerDelete)
-	s.mux.HandleFunc("GET /system/ntp/test", s.handleNTPTest)
+	s.mux.HandleFunc("POST /system/ntp/test", s.handleNTPTest)
 }
 
 // handleSetTimezone stores the appliance's UTC offset (config.Timezones).
@@ -95,19 +95,25 @@ func (s *Server) handleNTPServerDelete(w http.ResponseWriter, r *http.Request) {
 	redirect(w, r, "/system", err)
 }
 
+// The two probe endpoints are POST, not GET, even though they change nothing on
+// the appliance: they make the firewall open an outbound connection to an
+// address the caller names. As GETs they were reachable by plain cross-site
+// navigation, which turns them into blind SSRF/port-probe triggers behind the
+// LAN boundary (design-review §4.4). POST puts them behind the CSRF gate.
+
 // handleDNSTest probes an upstream resolver live and returns an HTML fragment
 // htmx swaps into the row. With a hostname it times a DNS-over-TLS handshake
 // (and verifies the cert); otherwise it times a plain UDP query round trip.
 func (s *Server) handleDNSTest(w http.ResponseWriter, r *http.Request) {
-	address := strings.TrimSpace(r.URL.Query().Get("address"))
-	hostname := strings.TrimSpace(r.URL.Query().Get("hostname"))
+	address := strings.TrimSpace(r.FormValue("address"))
+	hostname := strings.TrimSpace(r.FormValue("hostname"))
 	d, note, err := probeDNS(address, hostname)
 	writeProbeResult(w, d, note, err)
 }
 
 // handleNTPTest times an SNTP request/response round trip to the time source.
 func (s *Server) handleNTPTest(w http.ResponseWriter, r *http.Request) {
-	server := strings.TrimSpace(r.URL.Query().Get("server"))
+	server := strings.TrimSpace(r.FormValue("server"))
 	d, err := probeNTP(server)
 	writeProbeResult(w, d, "", err)
 }
@@ -124,12 +130,20 @@ func (s *Server) handleSMTPSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	password := r.FormValue("password")
 	err := s.store.Update(func(c *config.Config) error {
+		// The form no longer echoes the stored password back into the page
+		// (design-review §4.7), so a blank field means "keep what is stored",
+		// not "clear it". Clearing the relay is done by clearing the host.
+		pw := password
+		if pw == "" {
+			pw = c.SMTP.Password
+		}
 		c.SMTP = config.SMTP{
 			Host:     strings.TrimSpace(r.FormValue("host")),
 			Port:     port,
 			Username: strings.TrimSpace(r.FormValue("username")),
-			Password: r.FormValue("password"),
+			Password: pw,
 			From:     strings.TrimSpace(r.FormValue("from")),
 			Security: r.FormValue("security"),
 		}
@@ -228,6 +242,15 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return errors.New("user not found")
 	})
+	if err == nil {
+		// A deleted account must not keep a working cookie, and its abandoned
+		// TOTP enrollment must not outlive it (design-review §4.5, §4.8).
+		s.sessions.DeleteUser(name)
+		s.totpMu.Lock()
+		delete(s.totpPending, name)
+		delete(s.totpLastStep, name)
+		s.totpMu.Unlock()
+	}
 	redirect(w, r, "/system", err)
 }
 
@@ -246,6 +269,16 @@ func (s *Server) handleUserPassword(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Update(updateUser(name, func(u *config.User) {
 		u.PasswordHash = hash
 	}))
+	if err == nil {
+		// Changing a password revokes every session issued under the old one —
+		// that is the point of changing it (design-review §4.5). Rotate rather
+		// than revoke for the caller's own account, so an admin resetting their
+		// own password is not logged out by the act of doing it.
+		s.sessions.DeleteUser(name)
+		if actor, _ := r.Context().Value(userKey{}).(string); actor == name {
+			s.setSessionCookie(w, r, s.sessions.Create(name))
+		}
+	}
 	redirect(w, r, "/system", err)
 }
 

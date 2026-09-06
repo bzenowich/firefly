@@ -97,6 +97,10 @@ func (c *Collector) ingest(pkt []byte) {
 		log.Printf("flow: decode: %v", err)
 		return
 	}
+	// Arrival time is the flow's timestamp: pflow exports at pf state teardown,
+	// so a long flow is charged to the minute it ended, not the minutes it ran
+	// (see the flows.ts comment in store.go — the IPFIX flowStart/End IEs are
+	// present but can't be used for bucketing as the schema stands).
 	now := time.Now()
 	out := recs[:0]
 	for _, r := range recs {

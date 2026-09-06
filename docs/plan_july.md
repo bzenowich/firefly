@@ -4,6 +4,10 @@ Status snapshot and prioritized next steps, written 2026-07-01. Context:
 `../plan.md` (master plan), `firewalla.md` (competitive analysis vs Firewalla
 Purple / Purple SE), `visibility-design.md` (baseline flow pipeline).
 
+**Everything below is the 2026-07-01 snapshot and is left as written.** For where
+the seven priorities actually stand, see **Status update — 2026-09-04** near the
+end of this document.
+
 ## Where the project stands
 
 **Phase 0 (software) is ~80% done.** Built and working:
@@ -93,6 +97,58 @@ exists.
 
 Table stakes in 2026 (`plan.md` §13); Firewalla has it. Needed before launch
 but less urgent than 1–5.
+
+## Status update — 2026-09-04
+
+Where the seven priorities actually stand, two months on. The honest headline:
+**the triad is at ~0.5 of 3, and nothing has been committed since 2026-07-15.**
+Hardware arriving (an N150 / 16 GB / 256 GB / 4× i226 COTS box — `../plan.md` §10
+Phase 0) is the natural restart, and bring-up work interleaves cleanly with the
+triad because the triad is pure software.
+
+| # | Priority | State |
+|---|---|---|
+| 1 | nDPI helper real capture | **Done** — landed 2026-07-15 (`9f0c47a`), same day it was written down. Residuals below. |
+| 2 | Device identity layer | **Half done** — registry built (`75e497f`), UI landing now. |
+| 3 | Observe→enforce (block from flow) | Not started. |
+| 4 | Adblock fetch/compile job | Not started. |
+| 5 | Alerting | Not started. |
+| 6 | QoS / bufferbloat | Not started. |
+| 7 | IPv6 (DHCPv6-PD, RA) | Not started. |
+
+**1 — done, with three residuals that belong to bring-up, not to the build.**
+`source_pcap.go` (libpcap, BPF-filtered, per-device), `parse.go`, and
+`classifier_ndpi.go` on the nDPI 5.0 API all shipped behind the `pcap` / `ndpi`
+tags, and the VM soak showed flows labelled end-to-end with TLS confirmed. What is
+*not* settled, and is now recorded in `visibility-design.md` §7: whether the
+`pflow(4)` IPFIX template carries **ifindex** at all (the question this priority was
+supposed to answer and didn't); **whether pflow exports pre- or post-NAT tuples**,
+which decides whether per-device app attribution is even possible and therefore
+gates priority 2's payoff; and the **load spike** the longer soak showed, still
+unexplained. All three are empirical and want the real box. One thing this priority
+assumed but never delivered: the helper is built for no target — nothing in the
+image or deploy path compiles it for FreeBSD, so on the appliance today app labels
+silently do not exist. That is the first bring-up task, not a design question.
+
+**2 — registry built, UI landing now.** `internal/devices` exists: a MAC-keyed
+registry joining ARP/NDP tables and Kea leases, per the July design. It has been
+sitting unwired — no route, no template, no per-device page — so flows are still
+keyed by raw IP and none of the things this priority unblocks (per-device pages,
+parental zones, new-device alerts, per-device QoS) can be built on it yet. That is
+being closed now; treat priority 2 as **in flight, not finished**, and note that
+"finished" means *flows joined on device*, not merely a device table rendering.
+Two known gaps in the registry itself when the UI lands on it: lease parsing ignores
+the `expire` column (stale attribution until Kea's LFC rewrite) and reads IPv4
+leases only.
+
+**3–7 — not started, and the ordering still looks right.** Nothing here has been
+invalidated by the last two months. 3 remains the cheapest high-leverage item on the
+list *once 2 lands* (the apply/confirm/rollback engine it needs already exists), and
+5's first alarm still falls straight out of 2's registry. The one thing worth
+re-weighing against `../plan.md` §10's Phase 0 exit criterion: a **hardening pass**
+(non-root `fwd` + root helper, CSRF, session revocation, unprivileged shell user)
+now competes with this list for the same solo hours, and it gets more expensive the
+more surface 3–7 add. Sequence it before or alongside 3, not after 7.
 
 ## Deferred (deliberately)
 

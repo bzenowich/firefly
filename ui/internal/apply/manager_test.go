@@ -62,21 +62,40 @@ func (s *fakeSys) Run(name string, args ...string) error {
 	defer s.mu.Unlock()
 	cmd := name + " " + strings.Join(args, " ")
 	s.cmds = append(s.cmds, cmd)
-	if s.failCmd != "" && strings.HasPrefix(cmd, s.failCmd) {
+	// Substring, not prefix: most reloads are now `sh -c "sysrc …; service …"`
+	// so the interesting part is in the middle of the command line.
+	if s.failCmd != "" && strings.Contains(cmd, s.failCmd) {
 		return &CmdError{Cmd: cmd, Output: "synthetic failure", Err: fs.ErrInvalid}
 	}
 	return nil
 }
 
-func (s *fakeSys) ran(prefix string) bool {
+func (s *fakeSys) ran(sub string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.cmds {
-		if strings.HasPrefix(c, prefix) {
+		if strings.Contains(c, sub) {
 			return true
 		}
 	}
 	return false
+}
+
+// order returns -1 when the command matching a came before the one matching b
+// (the expected ordering), otherwise the index of the offending b command.
+func (s *fakeSys) order(a, b string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seenA := false
+	for i, c := range s.cmds {
+		if strings.Contains(c, a) {
+			seenA = true
+		}
+		if strings.Contains(c, b) && !seenA {
+			return i
+		}
+	}
+	return -1
 }
 
 func (s *fakeSys) get(p string) (string, bool) {
@@ -102,10 +121,23 @@ func TestApplyInstallsValidatesReloads(t *testing.T) {
 			t.Errorf("%s.staged left behind", p)
 		}
 	}
-	for _, cmd := range []string{"pfctl -nf", "kea-dhcp4 -t", "unbound-checkconf", "pfctl -f", "service kea restart", "service unbound restart"} {
+	for _, cmd := range []string{
+		"pfctl -nf", "kea-dhcp4 -t", "unbound-checkconf", "pfctl -f",
+		// Reloads use the one* forms, which work whether or not the rcvar is
+		// set, and set the rcvar so the service also comes back after a boot.
+		"sysrc kea_enable=YES", "service kea onerestart",
+		"sysrc unbound_enable=YES", "service unbound onerestart",
+		"sysrc pf_enable=YES pflog_enable=YES",
+		// Addressing is applied before pf loads rules that resolve against it.
+		"service fwnetwork onerestart",
+	} {
 		if !sys.ran(cmd) {
 			t.Errorf("command %q not run", cmd)
 		}
+	}
+	// Interface addressing must be reloaded before pf reads :network macros.
+	if got := sys.order("service fwnetwork onerestart", "pfctl -f"); got >= 0 {
+		t.Errorf("pf reloaded before interface addressing (index %d)", got)
 	}
 	if _, ok := m.Pending(); !ok {
 		t.Error("apply must leave a pending window")
@@ -217,8 +249,13 @@ func TestStaleWireGuardFileRemoved(t *testing.T) {
 	if _, ok := sys.get(path.Join(WGConfDir, "wg3.conf")); ok {
 		t.Error("stale wg conf not removed")
 	}
-	if !sys.ran("service wireguard restart") {
+	if !sys.ran("service wireguard") {
 		t.Error("wireguard not restarted after stale removal")
+	}
+	// With every tunnel gone the rc script must be told so, or it keeps
+	// managing interfaces that no longer have configs.
+	if !sys.ran("wireguard_interfaces=") {
+		t.Error("wireguard_interfaces not updated after stale removal")
 	}
 	if err := m.Rollback(); err != nil {
 		t.Fatal(err)

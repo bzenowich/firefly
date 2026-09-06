@@ -32,6 +32,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	mw.Close()
 	req := httptest.NewRequest("POST", "/system/restore", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(csrfHeader, c.csrf)
 	req.AddCookie(c.cookie)
 	rec := httptest.NewRecorder()
 	c.srv.ServeHTTP(rec, req)
@@ -50,6 +51,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	mw.Close()
 	req = httptest.NewRequest("POST", "/system/restore", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(csrfHeader, c.csrf)
 	req.AddCookie(c.cookie)
 	rec = httptest.NewRecorder()
 	c.srv.ServeHTTP(rec, req)
@@ -96,6 +98,39 @@ func TestUserManagement(t *testing.T) {
 	}
 	if len(store.Get().Users) != 1 {
 		t.Fatal("bob not deleted")
+	}
+}
+
+// TestPasswordChangeRevokesSessions: the whole point of changing a password is
+// that cookies issued under the old one stop working (design-review §4.5).
+func TestPasswordChangeRevokesSessions(t *testing.T) {
+	c, _ := newTestServer(t)
+	c.post(t, "/system/users", url.Values{"username": {"bob"}, "password": {"longenough"}})
+
+	w := login(c.srv, "10.0.0.5:1234", "bob", "longenough")
+	if w.Header().Get("Location") != "/" {
+		t.Fatalf("bob login: %q", w.Header().Get("Location"))
+	}
+	var bob *http.Cookie
+	for _, ck := range w.Result().Cookies() {
+		if ck.Name == sessionCookie {
+			bob = ck
+		}
+	}
+	if bob == nil {
+		t.Fatal("bob got no session cookie")
+	}
+
+	c.post(t, "/system/users/bob/password", url.Values{
+		"password": {"newpassword"}, "confirm": {"newpassword"},
+	})
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(bob)
+	rec := httptest.NewRecorder()
+	c.srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("bob's old session after password change: status %d, want a redirect to /login", rec.Code)
 	}
 }
 

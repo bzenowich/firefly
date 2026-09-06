@@ -56,12 +56,62 @@ Program Office** confirms a public FSP; the LPDDR5-ECC/Gen4 advantages don't mat
   DDR4, drop-in N100 fallback) and **Atom x7425E** (embedded, 12 W, ~10–15-yr life +
   industrial temp; true drop-in on the same PCB). See §1 for the full SKU strategy;
   C1110 is demoted (no public coreboot FSP — §1, risk #7).
-- **Memory:** 8 GB soldered DDR4-3200 (single channel, 4× x16 chips). In-Band ECC
-  enabled where the SKU/firmware supports it. Soldered like the APU2 — no SODIMM to
-  work loose, better vibration/thermal profile.
+- **Memory:** **16 GB** soldered DDR4-3200 (single channel, **8× x16 chips,
+  dual-rank**). In-Band ECC enabled where the SKU/firmware supports it. Soldered like
+  the APU2 — no SODIMM to work loose, better vibration/thermal profile.
+  - **Why 8 devices, not 4 — this is a layout decision, not a BOM decision.** DDR4 x16
+    dies top out at **16 Gb (2 GB)**; 32 Gb DDR4 was never commercialized. So 4× x16 =
+    8 GB is the hard ceiling for a *single rank*, and 16 GB requires a second rank
+    (8 devices). DDR5 doesn't change the answer here: 24 Gb and 32 Gb dies do exist
+    (32 Gb is commercialized), so 4× x16 DDR5 could in principle reach 16 GB — but
+    ADL-N caps at 16 GB total anyway, x16 DDR5 at those densities is a thin,
+    price-premium supply line, and the SKU we route for is DDR4. **Treat this as
+    moot, not as an argument** — it must never be the reason a later decision goes
+    one way. LPDDR5 would fit 16 GB in one or two packages but means a different,
+    stricter memory-down layout. **Route for 8 devices or 8 GB is permanent
+    for the life of the product.** Board area, clamshell/side-by-side placement,
+    two-rank fly-by routing, and an extra SI pass are the price.
+  - **One RAM config, stuffed on every unit.** 8 GB (one rank, 4 devices depopulated)
+    is a legal option on the same PCB, but the cost is not the ~$13 of DRAM — it is a
+    **second memory-down SPD blob in coreboot, a board-ID strap to select it, and a
+    second memory-training validation pass**. We already carry two SoC SKUs; a RAM axis
+    makes four variants for a solo-run product. Killing the axis is worth more than the
+    BOM delta. Revisit only if the value-SKU price proves sacred (§9).
+  - **16 GB is the platform ceiling**, not a compromise: Intel ARK lists max memory =
+    16 GB for both N150 and x7425E.
+  - **In-Band ECC costs capacity and bandwidth.** IBECC stores its check bits in the
+    same DRAM — budget roughly an eighth of the protected range, plus a read-bandwidth
+    penalty, so plan on **~14 GB usable of 16** with IBECC on. Measure at bring-up.
+    Single-channel DDR4-3200 (~25.6 GB/s) is already the platform's tightest resource.
+  - **Budget (see §8.5 for the full table):** baseline image ≈ 4 GB resident
+    (kernel + capped ZFS ARC + Unbound/blocklists + fwd + nDPI helper); everything on
+    (+ Suricata + ntopng/Redis + LLM) ≈ 10–12 GB. **8 GB = baseline plus one power-tier
+    feature; 16 GB = everything at once.**
 - **Storage:**
-  - M.2 2280 M-key, PCIe 3.0 x2 NVMe (primary)
-  - Optional 32 GB eMMC on board (low-cost SKU / recovery image)
+  - M.2 2280 M-key, PCIe 3.0 x2 NVMe — **primary, 256 GB standard fit**. 128 GB is a
+    dead market segment (low volume, often the same price as 256 GB), and the
+    full-featured budget below lands near 70 GB with ZFS headroom, so 256 GB is the
+    honest floor with room for retention growth.
+  - Optional **16 GB eMMC** on board — **recovery/rescue image only, not primary.**
+    32 GB cannot carry the full-featured appliance (see the budget below); as a
+    failsafe that survives a botched update or a dead NVMe, 16 GB is plenty.
+    **Bring-up risk:** ADL-N has an eMMC 5.1 controller, but FreeBSD's `sdhci`/`mmcsd`
+    path on Intel PCI SDHCI is far less exercised than NVMe — validate early or the
+    recovery path is theoretical.
+  - **Disk budget (§8 retention model):** base + packages 3–4 GB; 3–5 boot environments
+    6–15 GB unique; flow DB (1 h raw + minute/hour rollups, ~1 yr) 1–5 GB; bounded log
+    ring ≤2 GB; bounded Suricata `eve.json` ring 5–10 GB; ntopng + Redis 1–5 GB; LLM
+    model(s) 3–8 GB; swap + kernel minidump 4–8 GB. **Subtotal ~25–57 GB; ~70 GB with
+    ZFS kept under 80% full.**
+  - **Endurance is a non-issue; power-loss is the real risk.** At ~500 MB/day of flow +
+    log writes even a 100 TBW drive lasts decades. What kills appliance SSDs is being
+    yanked from the wall mid-write — pick a controller with decent power-loss handling,
+    not the cheapest DRAM-less QLC part on the BOM.
+  - **Per-dataset quotas protect the BE rollback.** Boot environments are the headline
+    feature (§6) and BE creation fails on a full pool, so a runaway `eve.json` would
+    take the rollback guarantee with it. Separate quota'd datasets for `/var/log`, the
+    flow DB, and `/conf`; `recordsize=16k` on the SQLite datasets, `atime=off`, `lz4`
+    (2–4× on log/flow text, so effective capacity beats raw).
 - **Networking:** 3× i226-IT, each on one PCIe 3.0 lane; 3× RJ45 with integrated
   magnetics, side-by-side front panel like APU2
 - **Expansion:** M.2 2230 E-key (PCIe x1 + USB 2.0) for optional Wi-Fi/BT —
@@ -163,7 +213,8 @@ Program Office** confirms a public FSP; the LPDDR5-ECC/Gen4 advantages don't mat
 - **Mobile-first, first-class (lesson from Firewalla):** the UI is a **responsive PWA
   served by the same binary** — installable (home-screen icon, standalone display),
   one mobile-first responsive layout (single-column reflow, bottom nav, large touch
-  targets; dashboard sparklines + uPlot graphs reflow to narrow). **No native app**
+  targets; dashboard cards and the canvas traffic graphs reflow to narrow).
+  **No native app**
   (would mean two codebases + app-store review — solo-killing) and **no cloud relay**
   (would break the no-cloud pillar). Remote phone management goes over the **WireGuard
   tunnel** we already ship — the QR-code WG onboarding below *is* the phone setup flow.
@@ -181,9 +232,22 @@ Program Office** confirms a public FSP; the LPDDR5-ECC/Gen4 advantages don't mat
   - **DHCP** — pools, static leases, active lease table
   - **DNS** — Unbound settings, local overrides, **Adblock** blocklist management with per-list enable + stats
   - **WireGuard** — site-to-site tunnels + peers, **and a wan-bound remote-access ("road warrior") server**: per-client keypair generation, auto-assigned tunnel IP, QR code + downloadable config, emailed config (via the System-page SMTP relay), and last-session time from `wg show`. Each client is **default-deny** and granted explicit access to **services** from the shared catalog via a searchable per-client access page (scales to ~100 services); grants are enforced in pf on the server interface. Clients get split-tunnel configs with the appliance gateway as DNS
-  - **Logs** — live firewall log (pflog tail via SSE/htmx), system log, filterable
-  - **Traffic Graph** — counters sampled to SQLite, rendered with uPlot (one small JS dep); live + historical (day/week/month)
-  - **Shell** — web terminal via ttyd reverse-proxied behind auth, **off by default**, big warning; SSH remains the recommended path
+  - **Logs** — live firewall log (pflog tail), system log, filterable. Refreshed by
+    **htmx polling** (`hx-trigger="every 5s"`) — one transport for every live view;
+    SSE stays unused until a view genuinely needs sub-poll latency
+  - **Traffic Graph** — counters sampled to SQLite, drawn with **hand-rolled 2D
+    canvas** (no charting library); live + historical (day/week/month). The only
+    vendored JS in the whole UI is htmx and xterm — that is a deliberate line, not
+    an accident: every chart dep is a supply-chain item on a security appliance
+  - **Shell** — web terminal **in-process**: xterm.js in the browser over a Go
+    WebSocket bridged to a `creack/pty` PTY by `fwd` itself — *not* ttyd or any
+    reverse-proxied second daemon. That matters for the security story: there is no
+    second listener, no second credential surface, and no process outside our auth
+    gate; the session inherits the fwd session cookie and is additionally gated by
+    an Origin check, a concurrent-session cap, an idle watchdog, and an audit ring
+    (`docs/shell.md`). **Off by default**, big warning; SSH remains the recommended
+    path — and the shell must run as an unprivileged user before this is safe to
+    expose beyond a bench LAN (see the §10 Phase 0 hardening exit criterion)
   - **System** — updates (BE-based), config backup/restore (single file!), users, certificates, **outbound SMTP relay** (shared email facility: WireGuard client configs today, status/alerts later), reboot/halt
 - **Auth:** local users, bcrypt/argon2, session cookies, optional TOTP, login
   rate-limiting. **Passkeys/WebAuthn** for biometric phone login (no password) —
@@ -263,12 +327,16 @@ records) — never statically linked in, never reimplemented:
 **Go therefore implements:** the **IPFIX collector** (flow records → SQLite); **alert
 ingestion** (Suricata `eve.json` → SQLite ring buffer → UI + the §8.5 LLM feed);
 **config generation** for every engine (`suricata.yaml`, ntopng cfg, `pflow` setup) via
-the same declarative engine as pf/unbound (§7); the **Traffic Graph + flow UI** (uPlot,
-§7); and **engine supervision** (start/stop/health). Go does **not** implement nDPI
+the same declarative engine as pf/unbound (§7); the **Traffic Graph + flow UI**
+(server-rendered htmx + hand-rolled canvas, no chart dep — §7); and **engine
+supervision** (start/stop/health). Go does **not** implement nDPI
 dissectors, the Suricata engine, ntopng's forensic app, or packet-path flow export.
 
-**Two gotchas that drive the tiering.** (1) **Redis** — ntopng *requires* it, an extra
-always-on service competing for RAM on the 8 GB box (and with the §8.5 LLM). (2)
+**Two gotchas that drive the tiering.** (1) **Redis** — ntopng *requires* it, a second
+always-on service (~1–1.5 GB with ntopng, §8.5) that must be installed and running or
+enabling Visibility fails at apply time. Even at the §2 16 GB sizing that is real
+budget, and it competes head-on with the §8.5 LLM's ~3 GB — which is precisely why the
+pair is the opt-in power tier and not the baseline. (2)
 **Licensing** — Suricata GPLv2, ntopng GPLv3, nDPI LGPL are all fine as **separate
 processes/packages** (mere aggregation, exactly as we already ship pf/unbound), but
 **none may be static-linked into the Go binary**; in particular keep nDPI behind a
@@ -335,10 +403,29 @@ RAM- and thermal-bound:
   alert data before committing — 2 B models are weak at multi-step correlation.
 - **Runtime:** `llama.cpp` (FreeBSD-buildable, single static-ish binary, no Python),
   loaded lazily; unload after idle to reclaim RAM.
-- **RAM:** 2–3 GB of the 8 GB base is shared with the OS, ntopng, and the flow DB —
-  tight. **A 16 GB RAM option becomes the recommended SKU if the LLM ships** (see §2;
-  the soldered-DDR4 design must leave the stuffing option open). Never swap a model to
-  NVMe — latency death.
+- **RAM: 16 GB is a hardware prerequisite for this layer, not an option.** The model
+  wants 2–3 GB resident, and it is the *last* claimant on the box:
+
+  | Consumer | Resident |
+  |---|---|
+  | FreeBSD kernel + base services | ~0.5 GB |
+  | ZFS ARC (capped — must be capped) | 2 GB |
+  | pf states (200k) | ~0.06 GB |
+  | Unbound + adblock local-zone (1M entries) | 0.5–1 GB |
+  | fwd (Go) + SQLite page cache | ~0.3 GB |
+  | `ndpi-helper` (100k tracked flows) | ~0.3 GB |
+  | **Baseline subtotal** | **~4 GB** |
+  | + Suricata w/ ET Open | 2–3 GB |
+  | + ntopng + Redis | 1–1.5 GB |
+  | + Gemma 3n E2B Q4 + KV cache | ~3 GB |
+  | **Everything on** | **~10–12 GB** |
+
+  On 8 GB you get the baseline plus *one* power-tier feature; the LLM plus Suricata
+  plus ntopng does not fit. §2 therefore routes for 16 GB and stuffs it on every unit.
+  Note the phasing trap: **Phase 0.5 lands before any PCB work (§10)**, so the LLM
+  question is answered before layout — but only if the board was already routed for
+  8 DRAM devices, because that decision cannot be revisited later (§2). Never swap a
+  model to NVMe — latency death.
 - **Contention & thermal:** inference pegs all 4 cores and blows the 6 W fanless budget,
   so it is **burst-only**: hard-capped to 1–2 threads, `nice`/`rctl`-limited, and gated
   to run only when WAN is idle or on explicit user request. **Routing/NAT must never be
@@ -363,7 +450,8 @@ Positioned as **Phase 0.5** — after the visibility baseline, before any firmwa
 
 **Open questions for this layer:** (1) bundle a model in the image (size, license,
 update cadence) vs. an opt-in download? (2) is E2B good enough, or does the floor model
-have to be 3 B (→ 16 GB SKU mandatory)? (3) does the config-assistant write path stay
+have to be 3 B? (§2 now routes 16 GB on every unit, so this is a quality
+question, not a hardware one.) (3) does the config-assistant write path stay
 *draft-only* forever (safest) or ever auto-apply behind confirmation? Lean draft-only.
 
 ## 9. Certification, manufacturing, supply (sellable product)
@@ -383,24 +471,32 @@ have to be 3 B (→ 16 GB SKU mandatory)? (3) does the config-assistant write pa
   Lock the SoC SKU only after confirming distributor stock at Mouser/Arrow.
 - **BOM target & reality:** stretch goal is **sub-$200 retail** at a ~$70 BOM (beat
   the APU2's old $150-assembled price). Honest math says $70 is not reachable for a
-  custom x86 SBC — the SoC + 3 NICs + RAM alone are ~$60–75. Realistic numbers:
+  custom x86 SBC — the SoC + 3 NICs + RAM alone are ~$75–95 at the §2 sizing.
+  Realistic numbers:
 
   | Part | qty 100 | qty 1000 |
   |------|---------|----------|
   | N150 SoC | $45 | $35 |
   | 3× i226-IT | $16 | $13 |
-  | 8 GB DDR4 (soldered) | $18 | $14 |
-  | 32 GB eMMC (NVMe optional) | $10 | $6 |
-  | 8-layer PCB + BGA assembly | $45 | $25 |
+  | 16 GB DDR4 (soldered, 8× x16 dual-rank) | $34 | $27 |
+  | 256 GB M.2 NVMe | $22 | $17 |
+  | 16 GB eMMC (recovery image) | $7 | $4 |
+  | 8-layer PCB + BGA assembly (8 DRAM devices) | $48 | $28 |
   | Case (folded aluminum) | $25 | $18 |
   | Connectors / power / misc | $28 | $18 |
-  | **Total BOM** | **~$187** | **~$129** |
+  | **Total BOM** | **~$225** | **~$160** |
 
   So **$200 retail only works at scale and with thin margin**; it is not achievable
-  at a pilot run. Realistic positioning: **$249–299 retail** at launch (qty 100,
-  covers cert amortization + test + support), drifting toward a **$199 SKU at qty
-  1000+** with eMMC and DDR4. Levers to cut BOM: eMMC over NVMe, DDR4 over DDR5,
-  N100 over N150, volume on PCB/assembly (the single biggest swing). Don't chase $70.
+  at a pilot run. **⚠ The §2 memory/storage sizing moved this table** (8→16 GB DDR4,
+  256 GB NVMe standard, eMMC demoted to a recovery image, 8 DRAM devices to assemble):
+  BOM went ~$187→~$225 at qty 100 and ~$129→~$160 at qty 1000. **That breaks the
+  $249 end of the launch range** — $249 retail on a $225 BOM is a loss once cert, test,
+  and support are amortized, and the **$199 qty-1000 SKU is gone** at a $160 BOM.
+  Positioning needs a decision: **$329–379 at launch** drifting to **$279 at qty 1000+**,
+  or an explicit 8 GB / eMMC-only value SKU that accepts the second coreboot memory
+  config §2 rules out. Levers to cut BOM: 8 GB single-rank (costs a second SPD blob and
+  training pass — §2), eMMC over NVMe, DDR4 over DDR5, N100 over N150, volume on
+  PCB/assembly (the single biggest swing). Don't chase $70.
 - **Open hardware stance:** publish schematics, KiCad sources, coreboot config, and
   OS/UI source after pilot ships. Open design + sold-assembled is exactly the PC
   Engines model.
@@ -409,8 +505,8 @@ have to be 3 B (→ 16 GB SKU mandatory)? (3) does the config-assistant write pa
 
 | Phase | Deliverable | Duration (solo, est.) |
 |-------|-------------|----------------------|
-| **0 — Software first** | Full OS image + WebUI running on a COTS ADL-N / i226 box (e.g. a Protectli VP24xx or CWWK N100 unit). All 9 UI feature areas working, **as a mobile-first responsive PWA** (passkey login, WG-tunnel remote access — §7). **Network visibility baseline:** NetFlow/IPFIX + nDPI with ntopng integrated on-box (§8). This is the product's value; hardware can lag. | 3–4 months |
-| **0.5 — AI assist (optional)** | Off-by-default local LLM assist layer on top of the Phase 0 detector stack (Suricata + nDPI/ntopng): alert triage/summarize, alert explanation, NL flow queries, draft-only config assistant. `llama.cpp` + a 2–3 B model, burst-only, routing never starved. 16 GB RAM SKU if committed. **Software only — see §8.5.** | 1–2 months |
+| **0 — Software first** | Full OS image + WebUI running on a COTS ADL-N / i226 box (e.g. a Protectli VP24xx or CWWK N100 unit). All 9 UI feature areas working, **as a mobile-first responsive PWA** (passkey login, WG-tunnel remote access — §7). **Network visibility baseline (§8 tiering):** kernel `pflow(4)` → Go IPFIX collector → SQLite → the native Flows UI, with the separate nDPI helper supplying app labels — no ntopng, no Redis in the base image; ntopng + Redis are the opt-in power tier and only need to *install and enable cleanly*, not ship on. **Exit criterion — hardening pass:** the §7 privilege model actually implemented (non-root `fwd` + narrow root helper, shell defaulted to an unprivileged user), CSRF tokens on state-changing requests, and session revocation on user-delete/password-change. Cheaper now than after more surface accretes, and it is what separates "works on my bench LAN" from "safe on a LAN with other people on it". This is the product's value; hardware can lag. | 3–4 months |
+| **0.5 — AI assist (optional)** | Off-by-default local LLM assist layer on top of the Phase 0 detector stack (Suricata + nDPI/ntopng): alert triage/summarize, alert explanation, NL flow queries, draft-only config assistant. `llama.cpp` + a 2–3 B model, burst-only, routing never starved. Requires the 16 GB board (§2, §8.5). **Software only — see §8.5.** | 1–2 months |
 | **1 — Firmware** | coreboot + EDK2 payload booting the Phase 0 image on reference ADL-N hardware (Dasharo-supported box ideal), serial console end-to-end | 1–2 months |
 | **2 — Carrier board** | SMARC/COMe-Mini carrier in KiCad: NICs, power, console, M.2. 5 protos assembled, OS + coreboot running on own hardware | 3 months |
 | **3 — Case & thermal** | Folded-aluminum enclosure, thermal soak validation at 40 °C ambient | 1–2 months (overlaps 2) |
@@ -432,7 +528,9 @@ firewall/
 │   ├── carrier/     # Phase 2 KiCad project
 │   └── sbc/         # Phase 4 KiCad project
 ├── case/            # FreeCAD models, DXF flat patterns
-└── docs/            # user manual, build guides
+└── docs/            # design notes (visibility, nDPI helper, adblock, parental,
+                     #   shell, competitive analysis, marketing). No user manual
+                     #   yet — that's a Phase 5 deliverable
 ```
 
 ## 12. Top risks
@@ -477,11 +575,33 @@ firewall/
   get qty-100 pricing via the **Intel IoT design-in channel / CM**, not catalog. Optional:
   a direct query to the Intel FSP Program Office to settle the C1110 FSP question with
   certainty (currently ~75% NDA-gated).
-- Retail price point: $199 stretch (needs qty 1000+) vs $249–299 realistic at launch
+- **Retail price point — the old $199/$249–299 range is dead; pick the replacement.**
+  The §2 sizing (16 GB dual-rank, 256 GB NVMe standard, 8 DRAM devices to assemble)
+  moved the BOM to **~$225 @ qty 100 / ~$160 @ qty 1000** (§9 table), and $249 retail
+  on a $225 BOM is a loss once cert, test, and support amortize. §9's proposal is
+  **$329–379 at launch drifting to $279 at qty 1000+**; the only alternative that
+  keeps a sub-$250 SKU is an explicit 8 GB / eMMC-only value variant, which costs the
+  second coreboot memory config §2 deliberately killed. **Still open, and it is the
+  load-bearing one** — it sets the whole position against the Purple at ~$319 and
+  every number in `docs/firewalla.md` and `docs/marketing.md` follows from it.
+- **3-port vs 4-port on the sellable board.** §2 routes 3× i226-IT with **3 spare
+  PCIe lanes** — a 4th NIC is affordable in lanes, but costs a lane, a jack, ~$5 of
+  BOM, and front-panel width. Every COTS box in this class (and the Phase 0 bench
+  box) is 4-port, so 3 ports reads as a spec deficit on a comparison grid even when
+  the trust-tier argument (§8) only needs three. Software is already close to
+  port-count-agnostic — the config model takes N `opt` interfaces; only the UI's
+  add-an-interface affordance is missing — so this is purely a hardware/positioning
+  call, not an engine one. Decide before the Phase 2 carrier layout.
 - SMARC vs COM Express Mini for the Phase 2 module (pick by module vendor's ADL-N
   offering and long-life commitment — Kontron, Advantech, congatec all ship ADL-N SMARC)
 - IPv6 scope for v1 UI (DHCPv6-PD, RA — recommend yes, table stakes in 2026)
-- eMMC: worth the BOM cost vs. NVMe-only?
+- ~~eMMC: worth the BOM cost vs. NVMe-only?~~ **DECIDED (§2):** yes, but only as a
+  **16 GB recovery/rescue image** — never primary. NVMe is the primary and 256 GB is
+  the standard fit; 32 GB eMMC can't carry the full-featured appliance, while 16 GB
+  is plenty for a failsafe that survives a botched update or a dead NVMe, at $7/$4
+  on the §9 BOM. Residual is a *bring-up* risk, not a decision: FreeBSD's
+  `sdhci`/`mmcsd` path on Intel PCI SDHCI is far less exercised than NVMe — validate
+  early or the recovery path is theoretical, and drop the part if it doesn't work.
 - TPM: populate by default (measured boot story) or leave as option?
 - **Off-VPN push/alerting without a cloud.** Web Push needs a push service = cloud,
   which the no-cloud pillar forbids (§7). In-app alerts work fine for a phone on the

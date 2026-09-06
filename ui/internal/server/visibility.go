@@ -2,11 +2,13 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"firewall/ui/internal/config"
 	"firewall/ui/internal/render"
@@ -92,6 +94,21 @@ func (s *Server) handleVisibilityProxy() http.HandlerFunc {
 			http.Error(w, "network visibility is disabled", http.StatusForbidden)
 			return
 		}
+		// The http.Server's blanket Read/WriteTimeout are absolute deadlines on
+		// this connection, so a slow ntopng page or a long download truncates
+		// mid-response at 30 s. A proxy cannot know how long the upstream needs,
+		// so clear both (zero = no deadline) and let the upstream's own
+		// connection lifetime bound the exchange — this subtree is behind the
+		// session gate, so only authenticated admins can hold one open
+		// (design-review §4.3).
+		rc := http.NewResponseController(w)
+		if err := rc.SetReadDeadline(time.Time{}); err != nil {
+			log.Printf("visibility proxy: clear read deadline: %v", err)
+		}
+		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+			log.Printf("visibility proxy: clear write deadline: %v", err)
+		}
+
 		target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + strconv.Itoa(v.Port())}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {

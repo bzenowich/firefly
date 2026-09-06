@@ -1,8 +1,37 @@
 # Native traffic visibility — replacing ntopng
 
-Status: design exploration. No code yet. Decide the feature set later; this doc
-inventories what ntopng does and sketches how we'd build the equivalent
-natively in the existing Go + htmx single binary (plan.md §7, §8).
+> ## ⛔ SUPERSEDED — historical, not the design of record
+>
+> **The design of record is [`visibility-design.md`](./visibility-design.md).**
+> That pipeline is **built and shipping**: kernel `pflow(4)` → Go IPFIX collector →
+> SQLite → the native Flows UI, with app labels from a separate `cmd/ndpi-helper`
+> process. Cite that doc, not this one.
+>
+> Two things this document asserts are **no longer true**, and they are exactly the
+> assertions that would mislead:
+>
+> - **"cgo-free" is not a hard constraint.** It was, and the reasoning below (§2, §2.1,
+>   §5) is why we tried to hold it. What actually resolved it is that the constraint
+>   only ever needed to hold for **`fwd`** — and it still does: `fwd` is pure Go
+>   (`modernc.org/sqlite`) and `deploy.sh` cross-compiles it with a plain
+>   `GOOS=freebsd go build`. The C dependency lives in a **separate binary**, where the
+>   LGPL boundary plan.md §8 demands already forced it to live. So we ship full libnDPI
+>   (5.0) over libpcap in `cmd/ndpi-helper`, built natively with `-tags "pcap ndpi"`,
+>   and the "DPI-lite, pure Go" tier below was never built. The real cost is a build/
+>   deploy path for that one binary, not a compromised product.
+> - **"No code yet" is stale.** Written before any of it existed; the baseline landed
+>   in 2026-06 and the real capture + nDPI 5.0 classifier on 2026-07-15.
+>
+> **What is still worth reading here:** §1 (the ntopng feature inventory — still the
+> best checklist of what a mature visibility app does, and the yardstick for the native
+> UI), §2.2 (geo/ASN database licensing for a *sold* product — undecided and still
+> live), and §3 (the render/transport catalogue — its "server-computed SVG swapped by
+> htmx, canvas only where frame-rate matters, htmx and xterm are the only vendored JS"
+> house style is *current* and correct). Read §4's tiers as history.
+
+Status: **superseded design exploration**, retained for the inventory and the
+rationale trail. This doc inventories what ntopng does and sketches how we'd build the
+equivalent natively in the existing Go + htmx single binary (plan.md §7, §8).
 
 ## Why native
 

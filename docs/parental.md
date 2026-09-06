@@ -225,8 +225,10 @@ DNS/IP filtering decides *what*; parents also want *when*.
   feature worth matching.
 - **Time *quotas* (e.g. 2 h/day) are harder.** They need session accounting (bytes
   or connection-time per device) feeding a state machine that flips a block rule
-  when the budget is spent. Feasible with the NetFlow/flow-accounting work
-  (`netflow.md`) as the meter, but it's a real feature, not a config toggle.
+  when the budget is spent. Feasible with the shipped flow-accounting pipeline
+  (`visibility-design.md`: `pflow(4)` → collector → SQLite rollups) as the meter —
+  once flows are keyed by *device* and not raw IP — but it's a real feature, not a
+  config toggle.
   Scope it as a later tier; honest about the lift.
 
 ---
@@ -308,4 +310,5 @@ list auto-refresh). Tiers 3–5 are genuine new features; sequence them by deman
 
 *Stack references: `../plan.md` §7 (Unbound, pf, WebUI), §8 (segmentation /
 trust-tier port), §13 (no-cloud alerting). Visibility/accounting substrate:
-`./netflow.md`. Competitive context: `./firewalla.md`.*
+`./visibility-design.md` (the design of record — `./netflow.md` is superseded).
+Competitive context: `./firewalla.md`.*

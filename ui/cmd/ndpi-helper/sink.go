@@ -25,13 +25,21 @@ type socketSink struct {
 const (
 	minBackoff = 200 * time.Millisecond
 	maxBackoff = 5 * time.Second
+	// writeTimeout bounds a single label write. The engine is single-goroutine
+	// and calls Emit inline, so a collector that accepted the connection and
+	// then stopped reading (a stalled SQLite write, a hung fwd) would otherwise
+	// fill the socket buffer and block the classifier forever — capture keeps
+	// running and the packet channel silently overflows. A short deadline turns
+	// that into a dropped label and a redial instead.
+	writeTimeout = 2 * time.Second
 )
 
 func newSocketSink(path string) *socketSink {
 	return &socketSink{path: path, backoff: minBackoff}
 }
 
-// Emit writes one label, dialing if needed. A write error drops the connection
+// Emit writes one label, dialing if needed. A write error — including the
+// deadline expiring on a collector that stopped reading — drops the connection
 // so the next Emit redials; the label itself is lost (best-effort).
 func (s *socketSink) Emit(l flow.Label) error {
 	s.mu.Lock()
@@ -41,12 +49,22 @@ func (s *socketSink) Emit(l flow.Label) error {
 			return nil // still backing off; drop this label
 		}
 	}
+	if err := s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		s.dropLocked()
+		return err
+	}
 	if err := flow.WriteLabel(s.conn, l); err != nil {
-		s.conn.Close()
-		s.conn = nil
+		s.dropLocked()
 		return err
 	}
 	return nil
+}
+
+// dropLocked tears down a connection that failed a write, so the next Emit
+// redials (under backoff). Caller holds s.mu.
+func (s *socketSink) dropLocked() {
+	s.conn.Close()
+	s.conn = nil
 }
 
 // dialLocked attempts a connection, honoring backoff so a down collector can't

@@ -14,7 +14,10 @@ func serverConfig(t *testing.T) config.Config {
 	cfg := config.Default()
 	cfg.Services = []config.Service{
 		{ID: "s1", Name: "NAS", IP: "192.168.1.10", Port: 443, Proto: "tcp"},
-		{ID: "s2", Name: "DNS", IP: "192.168.1.1", Port: 53, Proto: "tcp/udp"},
+		// Ungranted, and deliberately not the appliance's own resolver: DNS
+		// to the firewall is infrastructure every client gets (see
+		// TestPFServerRules), so it would not prove grant enforcement.
+		{ID: "s2", Name: "Printer", IP: "192.168.1.20", Port: 9100, Proto: "tcp"},
 	}
 	cfg.WireGuard = config.WireGuard{
 		Enabled: true,
@@ -73,13 +76,17 @@ func TestPFServerRules(t *testing.T) {
 		"port 51820 keep state", // wan pinhole for the listen port
 		"block in on wgsrv all", // default deny on the VPN interface
 		"pass in on wgsrv inet proto tcp from 10.9.0.2 to 192.168.1.10 port 443 keep state", // the one grant
+		// Name resolution is infrastructure, not a grant: the client configs
+		// we hand out point at the appliance, so the default deny above must
+		// not swallow their lookups.
+		"pass in on wgsrv inet proto { tcp udp } from any to 192.168.1.1 port 53",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("pf missing %q:\n%s", want, out)
 		}
 	}
 	// The ungranted service must not produce a pass rule.
-	if strings.Contains(out, "192.168.1.1 port 53") {
+	if strings.Contains(out, "192.168.1.20 port 9100") {
 		t.Errorf("ungranted service leaked into pf:\n%s", out)
 	}
 }

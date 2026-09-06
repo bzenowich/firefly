@@ -24,8 +24,10 @@ const (
 // configures it. That is imperative, so it is wrapped in an rc.d service for
 // boot persistence and so apply can (re)start it. The script is idempotent —
 // it deletes any existing exporters before creating ours — so repeated applies
-// don't stack exporters. pf must also flag states with `set state-defaults
-// pflow` (render.PF) or nothing is exported.
+// don't stack exporters. pf must also flag states for export or nothing ships:
+// render.PF writes a per-rule `keep state (pflow)` on every pass rule, which is
+// required rather than a global `set state-defaults pflow` — an explicit
+// `keep state` on a rule overrides the global default.
 //
 // When Flow is disabled the script's start is a no-op (it only tears down);
 // apply pairs it with a service stop so nothing exports.
@@ -66,8 +68,13 @@ func Pflow(cfg config.Config) (string, error) {
 		w("\tkldload -n pflow 2>/dev/null")
 		w("\t%s_clear", PflowService)
 		w("\tpflowctl -c")
-		w("\tpflowctl -s pflow0 src 127.0.0.1 dst 127.0.0.1:%d proto 10", port)
-		w("\techo 'pflow exporter -> 127.0.0.1:%d (IPFIX)'", port)
+		// Configure whichever exporter now exists rather than assuming the
+		// clear left us pflow0: if a delete failed, the new exporter is
+		// pflow1 and we would silently configure the stale one instead.
+		w("\tid=$(pflowctl -l 2>/dev/null | awk -F: '/^pflow/{print $1; exit}')")
+		w("\t: ${id:=pflow0}")
+		w("\tpflowctl -s \"$id\" src 127.0.0.1 dst 127.0.0.1:%d proto 10", port)
+		w("\techo \"pflow exporter $id -> 127.0.0.1:%d (IPFIX)\"", port)
 	} else {
 		w("\t# Baseline network visibility is disabled.")
 		w("\t%s_clear", PflowService)

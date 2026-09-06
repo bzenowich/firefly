@@ -100,12 +100,20 @@ func PF(cfg config.Config) (string, error) {
 	}
 
 	if ports := wgListenPorts(cfg); len(ports) > 0 {
-		w("# WireGuard")
+		w("# WireGuard site-to-site")
 		for _, port := range ports {
 			w("pass in on $%s inet proto udp from any to ($%s) port %d %s", macro(wan), macro(wan), port, keepState)
 		}
-		// TODO: pass rules on the wg tunnel interfaces once tunnel
-		// device naming is wired up in config.
+		// The pinhole above only admits the encrypted transport. Decapsulated
+		// packets surface on the tunnel interface and are matched again by
+		// "block in log all", so without these the tunnel comes up, handshakes,
+		// and silently drops every packet through it. Site-to-site links are
+		// admin-configured trusted paths — the same trust the LAN and OPT
+		// interfaces get above — unlike the remote-access server below, which
+		// stays default-deny per client.
+		for _, dev := range wgTunnelDevices(cfg) {
+			w("pass in on %s inet all %s", dev, keepState)
+		}
 		w("")
 	}
 
@@ -133,6 +141,16 @@ func wgServerRules(b *strings.Builder, cfg config.Config, wan config.Interface) 
 	w("pass in on $%s inet proto udp from any to ($%s) port %d %s", macro(wan), macro(wan), s.Port(), keepState)
 	// Default deny on the VPN interface; every grant below is an explicit allow.
 	w("block in on %s all", WGServerDevice)
+	// Name resolution is not a grantable service — it is infrastructure the
+	// generated client configs already point at (render.WGClient sets DNS to
+	// the LAN address). Without this the default deny above swallows every
+	// client lookup and the VPN looks like it has no internet at all.
+	if lan, ok := byRole(cfg, "lan"); ok && cfg.DNS.Enabled && lan.IPv4 != "" {
+		if ip := strings.SplitN(lan.IPv4, "/", 2)[0]; ip != "" {
+			w("pass in on %s inet proto { tcp udp } from any to %s port 53 %s # dns for vpn clients",
+				WGServerDevice, ip, keepState)
+		}
+	}
 	for _, c := range s.Clients {
 		clientIP := strings.SplitN(c.Address, "/", 2)[0]
 		for _, id := range c.ServiceIDs {
@@ -209,6 +227,21 @@ func enabledForwards(cfg config.Config) []resolvedForward {
 			DestIP:   svc.IP,
 			DestPort: svc.Port,
 		})
+	}
+	return out
+}
+
+// wgTunnelDevices returns the interface name of each configured site-to-site
+// tunnel. It must agree with render.WireGuard's file naming, which numbers
+// tunnels wg0..wgN in config order — the tunnel's config file name is what
+// wg-quick takes as the interface name.
+func wgTunnelDevices(cfg config.Config) []string {
+	if !cfg.WireGuard.Enabled {
+		return nil
+	}
+	out := make([]string, 0, len(cfg.WireGuard.Tunnels))
+	for i := range cfg.WireGuard.Tunnels {
+		out = append(out, WGTunnelDevice(i))
 	}
 	return out
 }

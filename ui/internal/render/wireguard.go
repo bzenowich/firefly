@@ -19,11 +19,18 @@ type WGFile struct {
 	Content string
 }
 
+// WGTunnelDevice is the interface name of the i'th site-to-site tunnel.
+// wg-quick takes the interface name from the config file name, so this is the
+// single definition both the file renderer and the pf renderer key off.
+func WGTunnelDevice(i int) string { return fmt.Sprintf("wg%d", i) }
+
 // WireGuard renders one wg-quick config per tunnel. Devices are numbered
 // wg0..wgN in tunnel order.
-// TODO: deleting a tunnel renumbers later devices; harmless for config files
-// but revisit if anything starts referencing devices by name (pf rules on
-// tunnel interfaces will).
+//
+// Deleting a tunnel renumbers the ones after it: their interfaces change name,
+// so pf rules and the wg-quick units both shift. Apply handles that by
+// rewriting every tunnel file and restarting the set, but it does mean a
+// delete briefly interrupts the tunnels that follow it in the list.
 func WireGuard(cfg config.Config) ([]WGFile, error) {
 	var out []WGFile
 	for i, t := range cfg.WireGuard.Tunnels {
@@ -52,7 +59,7 @@ func WireGuard(cfg config.Config) ([]WGFile, error) {
 		}
 
 		out = append(out, WGFile{
-			Name:    fmt.Sprintf("wg%d.conf", i),
+			Name:    WGTunnelDevice(i) + ".conf",
 			Content: b.String(),
 		})
 	}

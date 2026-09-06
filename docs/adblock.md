@@ -184,8 +184,9 @@ lets users fix false positives. Options, cheapest first:
   DNS page.
 - Later: an Unbound python module (à la pfBlockerNG's `unbound_pi.py`) for
   richer per-client attribution — but that adds a python dependency we'd rather
-  avoid given the cgo-free / lean-binary stance (`netflow.md`); prefer log
-  parsing unless attribution demands the module.
+  avoid given the lean-binary stance (`plan.md` §8: `fwd` stays pure Go, and any C
+  or runtime dependency lives in a separate supervised process or not at all);
+  prefer log parsing unless attribution demands the module.
 
 ---
 
@@ -235,5 +236,7 @@ cron job piping a hosts file into a resolver.
 *Stack references: `../ui/internal/config/config.go` (`Adblock`),
 `../ui/internal/render/unbound.go` (`AdblockInclude`, the `include` wiring).
 Related: `./parental.md` (per-view blocklists, categorized feeds),
-`./netflow.md` (cgo-free / lean-binary constraints, SQLite reporting),
+`./visibility-design.md` (the shipped flow pipeline and the SQLite
+store/rollup/retention pattern this reporting should follow — it, not the
+superseded `./netflow.md`, is the visibility design of record),
 `./firewalla.md` (competitive context for blocking + reporting UX).*

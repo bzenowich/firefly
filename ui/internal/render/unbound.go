@@ -12,6 +12,21 @@ import (
 // the fetch/compile job is separate from rendering (runtime, network-bound).
 const AdblockInclude = "/var/db/fwd/adblock.conf"
 
+// TLSCertBundle is the CA bundle unbound verifies DNS-over-TLS upstreams
+// against, as installed by the FreeBSD ca_root_nss package.
+const TLSCertBundle = "/usr/local/share/certs/ca-root-nss.crt"
+
+// usesDoT reports whether any configured upstream is DNS-over-TLS. A hostname
+// on an upstream is what turns TLS on (config.System.DNSServers).
+func usesDoT(cfg config.Config) bool {
+	for _, d := range cfg.System.DNSServers {
+		if d.Hostname != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // Unbound renders unbound.conf: a validating recursive resolver listening on
 // the internal interfaces only, with local-data for the appliance itself and
 // configured host overrides.
@@ -53,9 +68,23 @@ func Unbound(cfg config.Config) (string, error) {
 	for _, in := range internal {
 		w("    access-control: %s allow", in.net)
 	}
+	// Remote-access clients are handed the appliance as their resolver
+	// (render.WGClient writes DNS = the LAN address), but they arrive from
+	// the tunnel subnet, which is not one of the interface networks above.
+	// Without this every connected client's name resolution is refused and
+	// the split-tunnel config looks simply broken.
+	if vpn, ok := wgServerNet(cfg); ok {
+		w("    access-control: %s allow", vpn)
+	}
 	w("")
 	w("    hide-identity: yes")
 	w("    hide-version: yes")
+	if usesDoT(cfg) {
+		// Required for DNS-over-TLS: without a bundle unbound cannot verify
+		// the upstream certificate. Installed by the ca_root_nss package,
+		// which the appliance provisioning pulls in for this reason.
+		w("    tls-cert-bundle: %s", TLSCertBundle)
+	}
 	w("    harden-glue: yes")
 	w("    harden-dnssec-stripped: yes")
 	w("    prefetch: yes")
@@ -77,7 +106,43 @@ func Unbound(cfg config.Config) (string, error) {
 	if cfg.DNS.Adblock.Enabled {
 		w("    # Compiled adblock blocklists (see AdblockInclude)")
 		w("    include: %s", AdblockInclude)
+		w("")
+	}
+
+	// Upstream forwarding. With no configured upstreams unbound stays a full
+	// recursive resolver, which is the privacy-preserving default; configuring
+	// upstreams is an explicit choice to trust (and be seen by) someone else.
+	if len(cfg.System.DNSServers) > 0 {
+		tls := usesDoT(cfg)
+		w("forward-zone:")
+		w("    name: \".\"")
+		if tls {
+			w("    forward-tls-upstream: yes")
+		}
+		for _, d := range cfg.System.DNSServers {
+			if tls {
+				// host@port#name: the name is what the certificate is
+				// verified against, which is the whole point of DoT.
+				w("    forward-addr: %s@853#%s", d.Address, d.Hostname)
+			} else {
+				w("    forward-addr: %s", d.Address)
+			}
+		}
 	}
 
 	return b.String(), nil
+}
+
+// wgServerNet returns the remote-access server's tunnel subnet, or ok=false
+// when the server is off or its address is unusable.
+func wgServerNet(cfg config.Config) (*net.IPNet, bool) {
+	s := cfg.WireGuard.Server
+	if !cfg.WireGuard.Enabled || !s.Enabled || s.Address == "" {
+		return nil, false
+	}
+	_, n, err := net.ParseCIDR(s.Address)
+	if err != nil {
+		return nil, false
+	}
+	return n, true
 }

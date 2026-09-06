@@ -4,14 +4,16 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"firewall/ui/internal/config"
 )
 
 // DefaultSources wires the live inputs for Build: the ARP and NDP neighbor
 // tables via the system tools, and DHCP leases from config plus the dynamic
-// lease file. Any source that fails or is absent (a dev box without arp/ndp, a
+// lease files. Any source that fails or is absent (a dev box without arp/ndp, a
 // box with no lease file) contributes nothing rather than erroring — the table
 // degrades to whatever is available, down to registry-only.
 func DefaultSources(cfg config.Config) Sources {
@@ -38,23 +40,38 @@ func readNeighbors() []Neighbor {
 	return out
 }
 
-// readDynamicLeases reads the Kea DHCPv4 lease CSV if present. It is best-effort
-// and location-dependent; absence yields no dynamic leases (static reservations
-// from config still populate the table).
+// readDynamicLeases reads the Kea DHCPv4 and DHCPv6 lease CSVs if present. It is
+// best-effort and location-dependent; absence yields no dynamic leases (static
+// reservations from config still populate the table). Both files are read so a
+// v6-only device — no ARP entry, no v4 lease — still contributes an identity;
+// the two memfiles share a format, and Kea records the client's link-layer
+// address in the v6 memfile's hwaddr column when it can see it, which is the
+// only way a v6 lease can join the MAC-keyed table.
 func readDynamicLeases() []Lease {
-	for _, path := range keaLeasePaths {
+	leases := readKeaLeaseFile(keaLease4Paths)
+	return append(leases, readKeaLeaseFile(keaLease6Paths)...)
+}
+
+// readKeaLeaseFile parses the first memfile in paths that exists.
+func readKeaLeaseFile(paths []string) []Lease {
+	for _, path := range paths {
 		if b, err := os.ReadFile(path); err == nil {
-			return parseKeaLeases(string(b))
+			return parseKeaLeases(string(b), time.Now())
 		}
 	}
 	return nil
 }
 
-// keaLeasePaths are the usual Kea DHCPv4 memfile locations; the first that
-// exists wins.
-var keaLeasePaths = []string{
+// keaLease4Paths and keaLease6Paths are the usual Kea memfile locations; the
+// first that exists wins.
+var keaLease4Paths = []string{
 	"/var/db/kea/kea-leases4.csv",
 	"/var/lib/kea/kea-leases4.csv",
+}
+
+var keaLease6Paths = []string{
+	"/var/db/kea/kea-leases6.csv",
+	"/var/lib/kea/kea-leases6.csv",
 }
 
 // parseARP extracts IP↔MAC pairs from `arp -an` output. The relevant shape is
@@ -122,11 +139,16 @@ func parseNDP(out string) []Neighbor {
 	return ns
 }
 
-// parseKeaLeases parses a Kea DHCPv4 memfile CSV. The header names the columns;
-// we take address, hwaddr, and hostname by name so column reordering across Kea
-// versions doesn't break the parse. A lease with a zero valid-lifetime (a
-// release/expiry tombstone) is skipped.
-func parseKeaLeases(csv string) []Lease {
+// parseKeaLeases parses a Kea DHCPv4 or DHCPv6 memfile CSV as of now. The header
+// names the columns; we take address, hwaddr, hostname, and expire by name so
+// column reordering (and the differing v4/v6 layouts) doesn't break the parse.
+// Rows that no longer describe a live lease are dropped: a zero valid-lifetime
+// (a release tombstone), an expire timestamp in the past, and — in the v6
+// file — a delegated prefix. Honoring expire matters because Kea only rewrites
+// the memfile when its cleanup (LFC) runs: without it an expired lease keeps
+// attributing an IP — and every byte that IP moves — to a device that gave it
+// up hours ago.
+func parseKeaLeases(csv string, now time.Time) []Lease {
 	lines := strings.Split(strings.TrimSpace(csv), "\n")
 	if len(lines) < 2 {
 		return nil
@@ -142,6 +164,9 @@ func parseKeaLeases(csv string) []Lease {
 	}
 	nameIdx, hasName := col["hostname"]
 	lifeIdx, hasLife := col["valid_lifetime"]
+	expIdx, hasExp := col["expire"]
+	typeIdx, hasType := col["lease_type"]
+	nowUnix := now.Unix()
 
 	// Later rows supersede earlier ones for the same address (the memfile is
 	// append-only), so index by address and let the last write win.
@@ -151,8 +176,20 @@ func parseKeaLeases(csv string) []Lease {
 		if addrIdx >= len(f) || macIdx >= len(f) {
 			continue
 		}
+		// lease_type only exists in the v6 file, where Kea writes it as an int
+		// (0 = IA_NA, 1 = IA_TA, 2 = IA_PD). Skip only the delegated prefix: it
+		// is a route, not an address any host answers on. Testing for the one
+		// known-bad value rather than "not 0" keeps an unexpected format from
+		// silently discarding every v6 lease.
+		if hasType && typeIdx < len(f) && strings.TrimSpace(f[typeIdx]) == "2" {
+			continue
+		}
 		if hasLife && lifeIdx < len(f) && strings.TrimSpace(f[lifeIdx]) == "0" {
 			delete(latest, f[addrIdx]) // released/expired: drop it
+			continue
+		}
+		if hasExp && expIdx < len(f) && expiredAt(f[expIdx], nowUnix) {
+			delete(latest, f[addrIdx]) // lease ran out; Kea just hasn't rewritten it
 			continue
 		}
 		l := Lease{IP: strings.TrimSpace(f[addrIdx]), MAC: strings.TrimSpace(f[macIdx])}
@@ -166,4 +203,16 @@ func parseKeaLeases(csv string) []Lease {
 		out = append(out, l)
 	}
 	return out
+}
+
+// expiredAt reports whether a Kea expire cell (absolute unix seconds) is in the
+// past. An unparseable or empty cell is treated as not expired: dropping a lease
+// we merely failed to read would lose identity, which is worse than holding a
+// stale one for a while.
+func expiredAt(cell string, now int64) bool {
+	exp, err := strconv.ParseInt(strings.TrimSpace(cell), 10, 64)
+	if err != nil {
+		return false
+	}
+	return exp <= now
 }

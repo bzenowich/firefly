@@ -18,7 +18,10 @@ func TestPflowDefaultEnabled(t *testing.T) {
 		"#!/bin/sh",
 		"# PROVIDE: fwpflow",
 		"pflowctl -c",
-		"pflowctl -s pflow0 src 127.0.0.1 dst 127.0.0.1:9996 proto 10",
+		// The exporter is configured by the id the kernel actually handed
+		// back, not a hardcoded pflow0 (a failed delete would shift it).
+		"pflowctl -l",
+		"pflowctl -s \"$id\" src 127.0.0.1 dst 127.0.0.1:9996 proto 10",
 		"run_rc_command",
 	} {
 		if !strings.Contains(out, want) {

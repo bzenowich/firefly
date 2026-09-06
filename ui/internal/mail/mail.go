@@ -67,7 +67,7 @@ func Send(cfg config.SMTP, to, subject, body string, attachments ...Attachment) 
 }
 
 // dial opens an SMTP session honoring the configured transport security:
-// implicit TLS on connect, opportunistic STARTTLS, or plaintext.
+// implicit TLS on connect, mandatory STARTTLS, or plaintext.
 func dial(cfg config.SMTP, addr string) (*smtp.Client, error) {
 	tlsCfg := &tls.Config{ServerName: cfg.Host}
 	if cfg.Security == "tls" {
@@ -88,11 +88,19 @@ func dial(cfg config.SMTP, addr string) (*smtp.Client, error) {
 		return nil, err
 	}
 	if cfg.Security != "none" {
-		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(tlsCfg); err != nil {
-				c.Close()
-				return nil, fmt.Errorf("smtp starttls: %w", err)
-			}
+		// "starttls" (and the empty default) means mandatory, not opportunistic.
+		// A relay that does not advertise the extension — or an active attacker
+		// stripping it from the EHLO reply — must abort the send, because what
+		// goes through here includes WireGuard client configs with a private key
+		// in them (design-review §4.7). Cleartext is available, but only by
+		// choosing security "none" on purpose.
+		if ok, _ := c.Extension("STARTTLS"); !ok {
+			c.Close()
+			return nil, errors.New(`smtp: relay does not offer STARTTLS (set security to "none" to send in cleartext anyway)`)
+		}
+		if err := c.StartTLS(tlsCfg); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("smtp starttls: %w", err)
 		}
 	}
 	return c, nil

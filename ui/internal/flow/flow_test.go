@@ -171,7 +171,9 @@ func TestStoreRollupAndQuery(t *testing.T) {
 	if err := s.Insert(now, recs); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := s.Rollup(now); err != nil {
+	// Rollup folds only whole seconds strictly in the past, so it must run at
+	// least a second after the insert for these rows to be in scope.
+	if err := s.Rollup(now.Add(time.Second)); err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
 
@@ -197,14 +199,14 @@ func TestStoreRollupAndQuery(t *testing.T) {
 		t.Errorf("10.0.0.7 in=%d, want 9000", got.In)
 	}
 
-	// Volume total over the window equals the sum of all flow bytes counted
-	// once per side: out-bytes total == in-bytes total == 11000.
+	// Volume is the traffic that actually crossed the box: each flow's bytes
+	// once, not once per endpoint.
 	var vol int64
 	for _, p := range res.Volume {
 		vol += p.Bytes
 	}
-	if vol != 2*(1500+500+9000) {
-		t.Errorf("volume sum = %d, want %d", vol, 2*(1500+500+9000))
+	if want := int64(1500 + 500 + 9000); vol != want {
+		t.Errorf("volume sum = %d, want %d", vol, want)
 	}
 
 	if len(res.Recent) != 3 {
@@ -213,12 +215,62 @@ func TestStoreRollupAndQuery(t *testing.T) {
 
 	// A second rollup must not double-count: the watermark already covers
 	// these flows.
-	if err := s.Rollup(now); err != nil {
+	if err := s.Rollup(now.Add(time.Second)); err != nil {
 		t.Fatalf("rollup 2: %v", err)
 	}
 	res2, _ := s.Query("hour")
 	if got := talkerByHost(res2.Talkers, "9.9.9.9"); got.Out != 9000 {
 		t.Errorf("after re-rollup 9.9.9.9 out=%d, want 9000 (no double count)", got.Out)
+	}
+}
+
+// TestRollupSameSecondNotStranded pins the fix for the watermark bug: a row
+// inserted after a rollup pass but inside the same one-second tick used to land
+// at or below the watermark (which was MAX(ts) of the folded rows) and was never
+// counted. Folding only whole seconds already past makes that impossible.
+func TestRollupSameSecondNotStranded(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "flows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	first := Record{Src: netip.MustParseAddr("10.0.0.5"), Dst: netip.MustParseAddr("1.1.1.1"),
+		SPort: 51000, DPort: 443, Proto: 6, Bytes: 1000, Pkts: 1}
+	if err := s.Insert(now, []Record{first}); err != nil {
+		t.Fatal(err)
+	}
+	// A pass inside the still-filling second.
+	if err := s.Rollup(now); err != nil {
+		t.Fatalf("rollup 1: %v", err)
+	}
+	// A second row lands in that same second, after the pass.
+	second := Record{Src: netip.MustParseAddr("10.0.0.5"), Dst: netip.MustParseAddr("8.8.8.8"),
+		SPort: 33000, DPort: 53, Proto: 17, Bytes: 400, Pkts: 1}
+	if err := s.Insert(now, []Record{second}); err != nil {
+		t.Fatal(err)
+	}
+	// The next pass, a second later, must account for both.
+	if err := s.Rollup(now.Add(time.Second)); err != nil {
+		t.Fatalf("rollup 2: %v", err)
+	}
+
+	res, err := s.Query("hour")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := talkerByHost(res.Talkers, "10.0.0.5"); got.Out != 1400 {
+		t.Errorf("10.0.0.5 out = %d, want 1400 (neither row stranded)", got.Out)
+	}
+
+	// And a further pass over the same rows still doesn't double-count.
+	if err := s.Rollup(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("rollup 3: %v", err)
+	}
+	res, _ = s.Query("hour")
+	if got := talkerByHost(res.Talkers, "10.0.0.5"); got.Out != 1400 {
+		t.Errorf("10.0.0.5 out = %d after re-rollup, want 1400", got.Out)
 	}
 }
 
