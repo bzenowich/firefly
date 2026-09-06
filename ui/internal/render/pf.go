@@ -78,7 +78,24 @@ func PF(cfg config.Config) (string, error) {
 
 	w("# Filter: default deny in, allow out from the firewall itself")
 	w("block in log all")
-	w("pass out quick inet %s", keepState)
+	// Address-family parity (docs/security-plan.md S4).
+	//
+	// Every filter rule below is written *without* an inet/inet6 keyword, which
+	// in pf means both families. That is deliberate, and it replaced an earlier
+	// attempt that emitted an explicit v6 twin for each v4 rule.
+	//
+	// The twins were wrong in a way only a real pfctl caught: `inet6 ... from
+	// $if:network` on an interface with no IPv6 address is "rule expands to no
+	// valid combination", which fails the *whole* ruleset — so on a v4-only box
+	// (every appliance today) nothing would load at all. Family-agnostic rules
+	// expand to whatever addresses each interface actually has, so they are
+	// correct on a v4-only box now and cover IPv6 the day addressing lands,
+	// with no second set of rules to keep in step.
+	//
+	// NAT stays inet: IPv6 does not NAT. ICMP and ICMPv6 are genuinely
+	// different protocols and keep their own rules.
+	w("pass out quick %s", keepState)
+	writeICMPv6Rules(&b, cfg, keepState)
 	w("antispoof quick for $%s", macro(wan))
 	w("")
 
@@ -177,6 +194,27 @@ func wgServerRules(b *strings.Builder, cfg config.Config, wan config.Interface) 
 // below. Ordering it the other way round would let a trusted-segment pass
 // admit management traffic before the block was ever consulted — the classic
 // way a management ACL ends up decorative.
+// writeICMPv6Rules admits the ICMPv6 that IPv6 requires to work at all.
+//
+// This is not the optional convenience ICMP is on v4. Neighbour discovery
+// replaces ARP, router advertisement is how a host gets a prefix, and path-MTU
+// discovery is how anything larger than the minimum MTU crosses the link.
+// Blocking these does not harden IPv6; it breaks it in ways that look like
+// intermittent application faults.
+//
+// Deliberately not `pass in inet6 proto icmp6 all`: the types below are the
+// ones that must work, and echo requests are admitted only from the segments
+// that may reach the appliance at all.
+func writeICMPv6Rules(b *strings.Builder, cfg config.Config, keepState string) {
+	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
+	w("# ICMPv6 that IPv6 cannot function without: neighbour discovery, router")
+	w("# advertisement, and path-MTU discovery. Blocking these breaks v6 rather")
+	w("# than hardening it.")
+	w("pass quick inet6 proto icmp6 icmp6-type { neighbrsol neighbradv routersol routeradv } %s", keepState)
+	w("pass quick inet6 proto icmp6 icmp6-type { unreach toobig timex paramprob } %s", keepState)
+	w("")
+}
+
 func writeManagementRules(b *strings.Builder, cfg config.Config, keepState string) {
 	w := func(format string, args ...any) { fmt.Fprintf(b, format+"\n", args...) }
 	ports := cfg.System.Management.ManagementPorts()
@@ -193,7 +231,7 @@ func writeManagementRules(b *strings.Builder, cfg config.Config, keepState strin
 		// their own firewall, which is worse than the exposure it closes.
 		if lan, ok := byRole(cfg, "lan"); ok {
 			w("# No explicit sources configured, so the whole LAN may manage the box.")
-			w("pass in quick on $%s inet proto tcp from $%s:network to (self) port %s %s",
+			w("pass in quick on $%s proto tcp from $%s:network to (self) port %s %s",
 				macro(lan), macro(lan), portList, keepState)
 		}
 	} else {
@@ -208,13 +246,14 @@ func writeManagementRules(b *strings.Builder, cfg config.Config, keepState strin
 			if ifc.Role == "wan" {
 				continue
 			}
-			w("pass in quick on $%s inet proto tcp from $management_sources to (self) port %s %s",
+			w("pass in quick on $%s proto tcp from $management_sources to (self) port %s %s",
 				macro(ifc), portList, keepState)
 		}
 	}
 	// Everything else, on every interface including the ones passed as trusted
-	// below.
-	w("block in log quick inet proto tcp to (self) port %s", portList)
+	// below. No family keyword, so the admin plane cannot be shut on v4 and
+	// open on v6.
+	w("block in log quick proto tcp to (self) port %s", portList)
 	w("")
 }
 
@@ -230,30 +269,32 @@ func writeSegmentRules(b *strings.Builder, cfg config.Config, keepState string) 
 		switch ifc.TrustLevel() {
 		case config.TrustTrusted:
 			w("# %s (trusted): full access.", ifc.Name)
-			w("pass in on $%s inet all %s", macro(ifc), keepState)
+			w("pass in on $%s all %s", macro(ifc), keepState)
 
 		case config.TrustGuest:
 			// Appliance services, then the internet, then nothing else. The
 			// order matters: the block is quick, so it must come after the
 			// passes it is meant to leave alone.
 			w("# %s (guest): appliance services and the internet, not the LAN.", ifc.Name)
-			w("pass in quick on $%s inet proto { tcp udp } from $%s:network to (self) port { 53 67 123 } %s",
+			// 67 is DHCPv4, 546/547 DHCPv6; the unused pair on either family
+			// costs nothing and keeps this one rule rather than two.
+			w("pass in quick on $%s proto { tcp udp } from $%s:network to (self) port { 53 67 123 546 547 } %s",
 				macro(ifc), macro(ifc), keepState)
 			w("pass in quick on $%s inet proto icmp from $%s:network to (self) icmp-type echoreq %s",
 				macro(ifc), macro(ifc), keepState)
 			writeNoLocalRule(w, cfg, ifc)
-			w("pass in on $%s inet from $%s:network to any %s", macro(ifc), macro(ifc), keepState)
+			w("pass in on $%s from $%s:network to any %s", macro(ifc), macro(ifc), keepState)
 
 		case config.TrustIsolated:
 			// DHCP only, because a host that cannot get a lease cannot use the
 			// segment at all. Everything else on the box is closed, and hosts
 			// on the segment cannot reach each other either.
 			w("# %s (isolated): DHCP and the internet only.", ifc.Name)
-			w("pass in quick on $%s inet proto udp from any to (self) port 67 %s", macro(ifc), keepState)
-			w("block in quick on $%s inet from $%s:network to $%s:network",
+			w("pass in quick on $%s proto udp from any to (self) port { 67 546 547 } %s", macro(ifc), keepState)
+			w("block in quick on $%s from $%s:network to $%s:network",
 				macro(ifc), macro(ifc), macro(ifc))
 			writeNoLocalRule(w, cfg, ifc)
-			w("pass in on $%s inet from $%s:network to any %s", macro(ifc), macro(ifc), keepState)
+			w("pass in on $%s from $%s:network to any %s", macro(ifc), macro(ifc), keepState)
 		}
 		w("")
 	}
@@ -278,7 +319,10 @@ func writeNoLocalRule(w func(string, ...any), cfg config.Config, from config.Int
 		}
 		nets = append(nets, "$"+macro(other)+":network")
 	}
-	w("block in log quick on $%s inet from $%s:network to { %s }",
+	// No family keyword: a segment fenced off on v4 with a clear path to the
+	// LAN on v6 is the exact failure this block exists to prevent, arriving
+	// through the family nobody looked at.
+	w("block in log quick on $%s from $%s:network to { %s }",
 		macro(from), macro(from), strings.Join(nets, " "))
 }
 

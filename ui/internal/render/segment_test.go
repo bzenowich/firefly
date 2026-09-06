@@ -33,24 +33,24 @@ func TestGuestSegmentCannotReachLANOrAdmin(t *testing.T) {
 	_, out := trustCfg(t, config.TrustGuest)
 
 	// Blocked from the appliance itself and from the LAN subnet.
-	want := "block in log quick on $opt1_if inet from $opt1_if:network to { (self) $lan_if:network }"
+	want := "block in log quick on $opt1_if from $opt1_if:network to { (self) $lan_if:network }"
 	if !strings.Contains(out, want) {
 		t.Errorf("guest segment is not blocked from the LAN and the box:\n%s", out)
 	}
 	// ...and that block is quick, so the pass-to-any below cannot undo it.
-	if !strings.Contains(out, "quick on $opt1_if inet from $opt1_if:network to { (self)") {
+	if !strings.Contains(out, "quick on $opt1_if from $opt1_if:network to { (self)") {
 		t.Error("the guest block is not quick, so a later pass would win")
 	}
 	// Still gets DNS/DHCP/NTP from the appliance, or the segment is unusable.
-	if !strings.Contains(out, "port { 53 67 123 }") {
+	if !strings.Contains(out, "port { 53 67 123 546 547 }") {
 		t.Error("guest segment cannot reach appliance DNS/DHCP/NTP")
 	}
 	// Still gets out.
-	if !strings.Contains(out, "pass in on $opt1_if inet from $opt1_if:network to any") {
+	if !strings.Contains(out, "pass in on $opt1_if from $opt1_if:network to any") {
 		t.Error("guest segment cannot reach the internet")
 	}
 	// The old blanket rule must be gone.
-	if strings.Contains(out, "pass in on $opt1_if inet all") {
+	if strings.Contains(out, "pass in on $opt1_if all") {
 		t.Error("guest segment still has the blanket trusted pass")
 	}
 }
@@ -59,15 +59,15 @@ func TestGuestSegmentCannotReachLANOrAdmin(t *testing.T) {
 func TestIsolatedSegmentBlocksPeers(t *testing.T) {
 	_, out := trustCfg(t, config.TrustIsolated)
 
-	if !strings.Contains(out, "block in quick on $opt1_if inet from $opt1_if:network to $opt1_if:network") {
+	if !strings.Contains(out, "block in quick on $opt1_if from $opt1_if:network to $opt1_if:network") {
 		t.Errorf("isolated hosts can still reach each other:\n%s", out)
 	}
 	// DHCP must survive, or a host cannot obtain a lease and the segment is
 	// dead rather than isolated.
-	if !strings.Contains(out, "proto udp from any to (self) port 67") {
+	if !strings.Contains(out, "proto udp from any to (self) port { 67 546 547 }") {
 		t.Error("isolated segment cannot get a DHCP lease")
 	}
-	if strings.Contains(out, "port { 53 67 123 }") {
+	if strings.Contains(out, "port { 53 67 123 546 547 }") {
 		t.Error("isolated segment was given the guest service set")
 	}
 }
@@ -76,7 +76,7 @@ func TestIsolatedSegmentBlocksPeers(t *testing.T) {
 // an upgrade must not silently cut the LAN off.
 func TestTrustedSegmentUnchanged(t *testing.T) {
 	_, out := trustCfg(t, config.TrustTrusted)
-	if !strings.Contains(out, "pass in on $opt1_if inet all") {
+	if !strings.Contains(out, "pass in on $opt1_if all") {
 		t.Error("a trusted segment lost its pass")
 	}
 }
@@ -95,7 +95,7 @@ func TestUnsetTrustDefaultsToTrusted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "pass in on $opt1_if inet all") {
+	if !strings.Contains(out, "pass in on $opt1_if all") {
 		t.Error("an interface with no trust level lost access on upgrade")
 	}
 }
@@ -111,7 +111,7 @@ func TestAdminPlaneIsClosedByDefault(t *testing.T) {
 	}
 
 	passIdx := strings.Index(out, "management_sources")
-	blockIdx := strings.Index(out, "block in log quick inet proto tcp to (self) port")
+	blockIdx := strings.Index(out, "block in log quick proto tcp to (self) port")
 	lanIdx := strings.Index(out, "pass in on $lan_if inet all")
 	switch {
 	case passIdx < 0:
@@ -186,7 +186,89 @@ func TestManagementIsNeverExposedOnTheWAN(t *testing.T) {
 	}
 
 	// And the catch-all block still applies everywhere.
-	if !strings.Contains(out, "block in log quick inet proto tcp to (self) port { 8443 22 }") {
+	if !strings.Contains(out, "block in log quick proto tcp to (self) port { 8443 22 }") {
 		t.Error("admin plane is not blocked outside the permitted sources")
+	}
+}
+
+// The segment policy must cover both address families, and it does so by being
+// written without a family keyword rather than by carrying a v6 twin for every
+// v4 rule (docs/security-plan.md S4).
+//
+// The twins were the first attempt and were wrong in a way only a real pfctl
+// caught: `inet6 ... from $if:network` on an interface with no IPv6 address is
+// "rule expands to no valid combination", which fails the whole ruleset — so on
+// a v4-only box, which is every appliance today, nothing would load at all.
+//
+// This test therefore asserts the *absence* of a family keyword on the rules
+// that must cover both, which is the property that makes them correct now and
+// correct when IPv6 addressing lands.
+func TestSegmentPolicyIsAddressFamilyAgnostic(t *testing.T) {
+	_, guest := trustCfg(t, config.TrustGuest)
+	_, isolated := trustCfg(t, config.TrustIsolated)
+
+	for name, out := range map[string]string{"guest": guest, "isolated": isolated} {
+		for _, want := range []string{
+			"block in log quick on $opt1_if from $opt1_if:network to { (self)",
+			"pass in on $opt1_if from $opt1_if:network to any",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s: missing family-agnostic rule %q:\n%s", name, want, out)
+			}
+		}
+		// No segment rule may pin a family: doing so is how one family gets
+		// fenced and the other does not.
+		for _, line := range strings.Split(out, "\n") {
+			if !strings.Contains(line, "$opt1_if:network") {
+				continue
+			}
+			// NAT is legitimately inet-only (IPv6 does not NAT), and ICMP and
+			// ICMPv6 are different protocols with their own rules.
+			if strings.HasPrefix(line, "nat ") || strings.Contains(line, "proto icmp") {
+				continue
+			}
+			if strings.Contains(line, " inet ") {
+				t.Errorf("%s: segment rule pinned to inet: %q", name, line)
+			}
+			if strings.Contains(line, " inet6 ") {
+				t.Errorf("%s: segment rule pinned to inet6: %q", name, line)
+			}
+		}
+	}
+
+	if !strings.Contains(isolated, "block in quick on $opt1_if from $opt1_if:network to $opt1_if:network") {
+		t.Error("isolated: peer block is not family-agnostic")
+	}
+}
+
+// The admin plane must be closed for both families, which again means no family
+// keyword rather than two rules.
+func TestAdminPlaneClosedForBothFamilies(t *testing.T) {
+	out, err := PF(config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "block in log quick proto tcp to (self) port") {
+		t.Errorf("admin-plane block is not family-agnostic:\n%s", out)
+	}
+	if strings.Contains(out, "block in log quick inet proto tcp to (self)") ||
+		strings.Contains(out, "block in log quick inet6 proto tcp to (self)") {
+		t.Error("admin-plane block pins an address family")
+	}
+}
+
+// ICMPv6 must pass or IPv6 does not work: neighbour discovery replaces ARP,
+// router advertisement carries the prefix, and path-MTU discovery is how
+// anything above the minimum MTU crosses. Blocking them breaks v6 in ways that
+// look like intermittent application faults.
+func TestICMPv6IsAdmitted(t *testing.T) {
+	out, err := PF(config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, t6 := range []string{"neighbrsol", "neighbradv", "routersol", "routeradv", "toobig"} {
+		if !strings.Contains(out, t6) {
+			t.Errorf("icmp6 type %s is not admitted", t6)
+		}
 	}
 }

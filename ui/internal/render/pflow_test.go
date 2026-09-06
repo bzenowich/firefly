@@ -79,7 +79,7 @@ func TestPFRulesFlaggedForPflow(t *testing.T) {
 	}
 	// The trusted-LAN pass rule specifically must be flagged (that's the bulk of
 	// the visible traffic).
-	if !strings.Contains(on, "pass in on $lan_if inet all keep state (pflow)") {
+	if !strings.Contains(on, "pass in on $lan_if all keep state (pflow)") {
 		t.Errorf("LAN pass rule missing (pflow):\n%s", on)
 	}
 
